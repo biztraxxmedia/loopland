@@ -1,0 +1,735 @@
+<!doctype html>
+<!--
+  VELVET DUNES / blue hour
+  PERIOD_MS=10000
+  One file. No assets, libraries, fonts, network access, or accumulated simulation.
+
+  Still frame: velvet_dunes.html?t=0.37
+  The optional t parameter is a normalized phase, wrapped into [0,1).
+  Live phase comes exclusively from the requestAnimationFrame timestamp.
+  Ripple harmonics, camera drift, plume turbulence, dust trajectories and grain
+  are periodic functions of A = 2*pi*phase. The macro terrain is stationary.
+  Dust takes closed trigonometric paths; it never teleports or respawns.
+  Phases 0 and 1 are explicitly canonicalized to the same input.
+
+  Pipeline: raymarched displaced heightfield + depth-tested sand motes;
+  linear-light, separable highlight bloom; ACES, gamma, fine grain, vignette.
+  Half-float render targets when available; sRGB8 render targets otherwise
+  (automatic sRGB storage preserves dark gradients and linear-light blending).
+  The artwork has no controls or visible text. Inspect the console for errors.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#09060f">
+  <title>Velvet Dunes</title>
+  <style>
+    :root { color-scheme: dark; background: #09060f; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    body { background: #09060f; }
+    canvas { display: block; width: 100vw; height: 100vh; width: 100dvw; height: 100dvh; }
+  </style>
+<link rel="icon" href="data:,"></head>
+<body>
+<canvas id="k-canvas" aria-label="Velvet sand dunes at blue hour, with wind-carved ripples and amber light"></canvas>
+
+<script id="k-world" type="x-shader/x-common">
+uniform vec2 kResolution;
+uniform float kAngle;
+const float kPI = 3.14159265358979323846;
+const float kTAU = 6.28318530717958647692;
+const float kNear = 0.1;
+const float kFar = 150.0;
+
+float kHash(vec2 kP) {
+    vec3 kV = fract(vec3(kP.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    kV += dot(kV, kV.yzx + 33.33);
+    return fract((kV.x + kV.y) * kV.z);
+}
+
+float kValue(vec2 kP) {
+    vec2 kI = floor(kP), kF = fract(kP);
+    vec2 kU = kF * kF * (3.0 - 2.0 * kF);
+    return mix(mix(kHash(kI), kHash(kI + vec2(1, 0)), kU.x),
+               mix(kHash(kI + vec2(0, 1)), kHash(kI + vec2(1, 1)), kU.x), kU.y);
+}
+
+float kFbm(vec2 kP) {
+    float kV = 0.56 * kValue(kP);
+    kP = mat2(1.61, 1.23, -1.23, 1.61) * kP + 7.2;
+    kV += 0.28 * kValue(kP);
+    kP = mat2(1.61, 1.23, -1.23, 1.61) * kP + 3.7;
+    return kV + 0.14 * kValue(kP);
+}
+
+float kEnvelope(float kX) {
+    float kW = kX * 0.122;
+    float kW2 = kW * kW;
+    return exp(-kW2 * kW2 * kW2);
+}
+
+float kRidgeZ(float kX) {
+    return 0.36 * kX + 0.80 * sin(kX * 0.34 + 0.6) - 0.35;
+}
+
+float kBase(vec2 kP) {
+    return -0.48 + 0.14 * sin(kP.x * 0.18 + kP.y * 0.13)
+                 + 0.10 * sin(kP.x * 0.31 - kP.y * 0.09 + 0.7);
+}
+
+// A rounded knife edge, a long windward shoulder, and a steeper lee slope.
+float kDuneSection(float kD, float kBack, float kFront) {
+    float kW = mix(kBack, kFront, smoothstep(-0.07, 0.07, kD));
+    float kR = sqrt(kD * kD + 0.0016) - 0.04;
+    return exp(-kR / kW);
+}
+
+float kOtherDunes(vec2 kP) {
+    float kD1 = kP.y - (-11.0 + 0.26 * kP.x + 1.0 * sin(kP.x * 0.20 + 1.7));
+    float kD2 = kP.y - (-24.0 + 0.20 * kP.x + 2.0 * sin(kP.x * 0.11 - 0.6));
+    float kH = 1.58 * (0.87 + 0.13 * cos(kP.x * 0.16)) * kDuneSection(kD1, 5.3, 2.6);
+    kH += 2.05 * kDuneSection(kD2, 6.8, 3.9);
+    kH += (1.0 - smoothstep(-45.0, -25.0, kP.y)) *
+           (0.38 + 0.38 * sin(kP.y * 0.26 + kP.x * 0.13 + 1.4));
+    return kH;
+}
+
+// x: elevation; y: primary ridge envelope; z: signed crest coordinate.
+vec3 kMacro(vec2 kP) {
+    float kE = kEnvelope(kP.x);
+    float kD = kP.y - kRidgeZ(kP.x);
+    float kH = 3.35 * kE * kDuneSection(kD, 6.1, 3.45);
+    return vec3(kBase(kP) + kOtherDunes(kP) + kH, kE, kD);
+}
+
+float kCrestY(float kX) {
+    vec2 kP = vec2(kX, kRidgeZ(kX));
+    return kBase(kP) + kOtherDunes(kP) + 3.35 * kEnvelope(kX);
+}
+
+float kRippleFiltered(vec2 kP, float kFoot) {
+    float kBend = 0.065 * sin(kP.y * 0.63 + kP.x * 0.10)
+                + 0.018 * sin(kP.y * 1.70 - kP.x * 0.30);
+    float kC = 30.0 * (kP.x * 0.98 + kP.y * 0.26 + kBend) - kAngle;
+    float kD = abs(kP.y - kRidgeZ(kP.x));
+    float kA = 0.021 * (0.78 + 0.22 * sin(kP.y * 0.37 + kP.x * 0.16));
+    kA *= mix(0.30, 1.0, smoothstep(0.025, 0.65, kD));
+    // Asymmetric cross-sections are displaced geometry, including in shadows.
+    vec3 kAA = 1.0 - smoothstep(vec3(0.48), vec3(1.75), vec3(30.0, 60.0, 90.0) * kFoot);
+    return kA * (0.70 * sin(kC) * kAA.x + 0.22 * sin(2.0 * kC + 1.05) * kAA.y
+                + 0.08 * sin(3.0 * kC + 1.9) * kAA.z);
+}
+
+float kRippleHeight(vec2 kP) {
+    return kRippleFiltered(kP, 0.0);
+}
+
+float kHeight(vec2 kP) {
+    return kMacro(kP).x + kRippleHeight(kP);
+}
+
+float kLens() {
+    float kAspect = kResolution.x / kResolution.y;
+    return mix(1.90, 2.55, smoothstep(0.80, 1.75, kAspect));
+}
+
+void kCamera(out vec3 kEye, out mat3 kBasis) {
+    float kAspect = kResolution.x / kResolution.y;
+    float kFit = max(1.0, 1.10 / kAspect);
+    vec3 kAim = vec3(-0.25, 1.94, -2.15);
+    vec3 kOffset = vec3(8.10, 2.86, 16.65) * kFit;
+    kEye = kAim + kOffset + vec3(0.075 * cos(kAngle), 0.025 * sin(kAngle), 0.045 * sin(kAngle));
+    vec3 kFwd = normalize(kAim - kEye);
+    vec3 kRight = normalize(cross(kFwd, vec3(0, 1, 0)));
+    kBasis = mat3(kRight, cross(kRight, kFwd), kFwd);
+}
+
+float kDepth(float kViewZ) {
+    return kFar / (kFar - kNear) - kFar * kNear / ((kFar - kNear) * kViewZ);
+}
+</script>
+
+<script id="k-fullscreen-vs" type="x-shader/x-vertex">#version 300 es
+precision highp float;
+out vec2 kUv;
+void main() {
+    vec2 kCorner = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    kUv = kCorner;
+    gl_Position = vec4(kCorner * 2.0 - 1.0, 0.0, 1.0);
+}
+</script>
+
+<script id="k-scene-fs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+precision highp int;
+in vec2 kUv;
+out vec4 kFrag;
+uniform float kStoreScale;
+/*__WORLD__*/
+
+vec3 kSunDir() { return normalize(vec3(-0.91, 0.155, 0.38)); }
+
+vec3 kSky(vec3 kD) {
+    float kH = exp(-abs(kD.y + 0.012) * 14.0);
+    vec3 kC = mix(vec3(0.0060, 0.0032, 0.0110), vec3(0.0030, 0.0021, 0.0062),
+                  smoothstep(0.0, 0.75, kD.y));
+    kC += vec3(0.010, 0.0040, 0.0090) * kH;
+    kC += vec3(0.020, 0.0065, 0.0070) * pow(max(dot(kD, kSunDir()), 0.0), 18.0);
+    // Almost invisible wind-banded atmosphere, never a bright backdrop.
+    float kCloud = kFbm(kD.xz * 3.0 / max(0.18, kD.y + 0.32) + vec2(4.0, 0));
+    kC += vec3(0.0018, 0.0008, 0.0022) * kCloud * kH;
+    return kC;
+}
+
+vec3 kEnvironment(vec3 kD) {
+    float kOverhead = pow(max(kD.y, 0.0), 0.65);
+    vec3 kC = mix(vec3(0.026, 0.012, 0.033), vec3(0.059, 0.041, 0.091), kOverhead);
+    float kRose = exp(-pow((kD.y - 0.12) / 0.18, 2.0));
+    kRose *= 0.5 + 0.5 * sin(atan(kD.z, kD.x) - 1.1);
+    kC += vec3(0.12, 0.052, 0.065) * kRose;
+    kC += vec3(1.00, 0.48, 0.16) * pow(max(dot(kD, kSunDir()), 0.0), 160.0) * 1.6;
+    return kC;
+}
+
+float kTrace(vec3 kRo, vec3 kRd) {
+    float kT = 0.15;
+    float kPrevious = kT;
+    for (int kI = 0; kI < 240; ++kI) {
+        vec3 kP = kRo + kRd * kT;
+        float kMacroGap = kP.y - kMacro(kP.xz).x;
+        float kGap = kMacroGap > 0.085 ? kMacroGap - 0.035 : kP.y - kHeight(kP.xz);
+        if (kGap < 0.0013 + kT * 0.00014) {
+            // A sign bracket avoids a ray-dependent stair step at the crest.
+            float kLo = kPrevious, kHi = kT;
+            for (int kJ = 0; kJ < 6; ++kJ) {
+                float kMid = 0.5 * (kLo + kHi);
+                vec3 kQ = kRo + kRd * kMid;
+                if (kQ.y > kHeight(kQ.xz)) kLo = kMid; else kHi = kMid;
+            }
+            return 0.5 * (kLo + kHi);
+        }
+        kPrevious = kT;
+        // The distant heightfield is smooth at the pixel footprint. A growing
+        // minimum step keeps near-tangent rays from exhausting the march.
+        float kMinStep = mix(0.0015, 0.50, smoothstep(28.0, 65.0, kT));
+        kT += clamp(kGap * 0.48, kMinStep, 4.0);
+        if (kT > kFar || (kRd.y > 0.0 && kP.y > 6.0)) break;
+    }
+    return kFar;
+}
+
+vec3 kSandNormal(vec3 kP, float kDistance) {
+    float kE = max(0.0025, kDistance / kResolution.y * 0.18);
+    float kPixelFoot = max(length(dFdx(kP.xz)), length(dFdy(kP.xz)));
+    vec2 kXp = kP.xz + vec2(kE, 0), kXm = kP.xz - vec2(kE, 0);
+    vec2 kZp = kP.xz + vec2(0, kE), kZm = kP.xz - vec2(0, kE);
+    float kDx = (kMacro(kXp).x - kMacro(kXm).x +
+               kRippleFiltered(kXp, kPixelFoot) - kRippleFiltered(kXm, kPixelFoot)) / (2.0 * kE);
+    float kDz = (kMacro(kZp).x - kMacro(kZm).x +
+               kRippleFiltered(kZp, kPixelFoot) - kRippleFiltered(kZm, kPixelFoot)) / (2.0 * kE);
+    // A band-limited mineral normal, much finer than the wind ripples.
+    float kFoot = kDistance * 2.0 / (kResolution.y * kLens());
+    float kFine = 1.0 - smoothstep(0.006, 0.027, kFoot);
+    float kGx = kValue(kP.xz * 215.0 + vec2(0.7, 0.0)) - kValue(kP.xz * 215.0 - vec2(0.7, 0.0));
+    float kGz = kValue(kP.xz * 215.0 + vec2(0.0, 0.7)) - kValue(kP.xz * 215.0 - vec2(0.0, 0.7));
+    return normalize(vec3(-kDx + 0.075 * kGx * kFine, 1.0, -kDz + 0.075 * kGz * kFine));
+}
+
+float kSoftShadow(vec3 kP, vec3 kN, vec3 kL) {
+    vec3 kOrigin = kP + kN * 0.004;
+    float kShade = 1.0;
+    float kFoot = max(length(dFdx(kP.xz)), length(dFdy(kP.xz)));
+    // The shadow receiver must lie on the same filtered micro-surface as the
+    // shadow caster, otherwise distant ripple valleys turn into black specks.
+    kOrigin.y += kRippleFiltered(kP.xz, kFoot) - kRippleHeight(kP.xz);
+    // Close samples resolve actual ripple self-shadowing at a grazing sun.
+    for (int kI = 0; kI < 12; ++kI) {
+        float kT = 0.025 + float(kI) * 0.033;
+        vec3 kQ = kOrigin + kL * kT;
+        float kH = kQ.y - kMacro(kQ.xz).x - kRippleFiltered(kQ.xz, kFoot);
+        kShade = min(kShade, clamp(kH * 15.0 / kT, 0.0, 1.0));
+    }
+    // Longer, softer shadows tie neighboring shoulders into one terrain.
+    float kT = 0.46;
+    for (int kI = 0; kI < 23; ++kI) {
+        vec3 kQ = kOrigin + kL * kT;
+        float kH = kQ.y - kMacro(kQ.xz).x;
+        kShade = min(kShade, clamp(kH * 7.0 / kT, 0.0, 1.0));
+        kT += clamp(abs(kH) * 0.65, 0.12, 1.8);
+    }
+    return smoothstep(0.02, 0.98, kShade);
+}
+
+float kOcclusion(vec3 kP, vec3 kN) {
+    float kOcc = 0.0, kWeight = 0.72;
+    float kFoot = max(length(dFdx(kP.xz)), length(dFdy(kP.xz)));
+    kP.y += kRippleFiltered(kP.xz, kFoot) - kRippleHeight(kP.xz);
+    for (int kI = 0; kI < 5; ++kI) {
+        float kD = 0.06 + float(kI * kI) * 0.105;
+        vec3 kQ = kP + kN * kD;
+        float kGap = (kQ.y - kMacro(kQ.xz).x - kRippleFiltered(kQ.xz, kFoot)) * max(0.3, kN.y);
+        kOcc += max(0.0, kD - kGap) * kWeight;
+        kWeight *= 0.56;
+    }
+    return clamp(1.0 - 1.4 * kOcc, 0.35, 1.0);
+}
+
+vec3 kShadeSand(vec3 kP, vec3 kRd, float kT) {
+    vec3 kN = kSandNormal(kP, kT), kV = -kRd, kL = kSunDir();
+    vec3 kM = kMacro(kP.xz);
+    float kNl = max(dot(kN, kL), 0.0), kNv = max(dot(kN, kV), 0.0);
+    float kShadow = kSoftShadow(kP, kN, kL);
+    float kAo = kOcclusion(kP, kN);
+    float kMineral = kFbm(kP.xz * 0.56 + vec2(17.0, 5.0));
+    vec3 kAlbedo = mix(vec3(0.29, 0.135, 0.155), vec3(0.48, 0.295, 0.19),
+                       smoothstep(0.22, 0.77, kMineral));
+    float kGrain = kValue(kP.xz * 175.0);
+    float kGrainFade = 1.0 - smoothstep(22.0, 60.0, kT);
+    kAlbedo *= 1.0 + (kGrain - 0.5) * 0.16 * kGrainFade;
+
+    // Rough diffuse plus the wide, grazing velvet sheen of individual grains.
+    float kRoughDiffuse = kNl * (0.79 + 0.21 * (1.0 - kNv) * (1.0 - kNl));
+    vec3 kSun = vec3(2.65, 1.47, 0.63);
+    vec3 kAmbient = mix(vec3(0.032, 0.014, 0.048), vec3(0.12, 0.070, 0.13),
+                        kN.y * 0.5 + 0.5);
+    vec3 kC = kAlbedo * (kAmbient * kAo + kSun * kRoughDiffuse * kShadow);
+    vec3 kHalf = normalize(kL + kV);
+    float kNh = max(dot(kN, kHalf), 0.0);
+    float kFresnel = 0.035 + 0.965 * pow(1.0 - kNv, 5.0);
+    float kSheen = pow(1.0 - kNv, 3.0) * (0.3 + 0.7 * pow(max(dot(kV, -kL), 0.0), 4.0));
+    kC += vec3(0.19, 0.085, 0.10) * kSheen * kAo;
+    kC += kEnvironment(reflect(kRd, kN)) * kFresnel * 0.28 * kAo;
+    kC += vec3(0.46, 0.22, 0.08) * pow(kNh, 32.0) * kShadow * 0.13;
+
+    // Sparse quartz facets: sub-pixel grains, not metallic glitter.
+    float kFacet = pow(max((kHash(floor(kP.xz * 390.0)) - 0.965) / 0.035, 0.0), 5.0);
+    float kSparkle = kFacet * pow(kNh, 18.0) * kShadow * kGrainFade;
+    kC += vec3(0.33, 0.22, 0.12) * kSparkle;
+
+    // One localized hot edge. Its falloff follows the real primary knife ridge.
+    float kRidge = exp(-abs(kM.z) * 48.0) * smoothstep(0.20, 0.72, kM.y);
+    kRidge *= 0.58 + 0.42 * pow(1.0 - kNv, 2.0);
+    kC = mix(kC, vec3(1.8, 0.185, 0.017) * (0.65 + 0.35 * kShadow),
+             min(0.96, kRidge * 1.22));
+
+    // Distance washes the remote dunes into the dark rose atmosphere.
+    float kFog = 1.0 - exp(-max(kT - 10.0, 0.0) * 0.020);
+    vec3 kFogColor = vec3(0.027, 0.011, 0.030) + vec3(0.010, 0.003, 0.001) *
+                     pow(max(dot(kRd, kL), 0.0), 5.0);
+    kC = mix(kC, kFogColor, kFog);
+    kC = mix(kC, kSky(kRd), smoothstep(48.0, 118.0, kT));
+    return kC;
+}
+
+vec2 kBoxInterval(vec3 kRo, vec3 kRd, vec3 kLo, vec3 kHi) {
+    vec3 kInv = 1.0 / (kRd + vec3(0.0000001));
+    vec3 kA = (kLo - kRo) * kInv, kB = (kHi - kRo) * kInv;
+    vec3 kMin = min(kA, kB), kMax = max(kA, kB);
+    return vec2(max(max(kMin.x, kMin.y), kMin.z), min(min(kMax.x, kMax.y), kMax.z));
+}
+
+vec3 kSandHaze(vec3 kRo, vec3 kRd, float kEnd, vec3 kUnder) {
+    vec2 kSpan = kBoxInterval(kRo, kRd, vec3(-11.0, 0.1, -6.0), vec3(11.0, 6.2, 8.0));
+    kSpan.x = max(kSpan.x, 0.0);
+    kSpan.y = min(kSpan.y, kEnd);
+    if (kSpan.y <= kSpan.x) return kUnder;
+    float kStep = (kSpan.y - kSpan.x) / 24.0;
+    float kTrans = 1.0;
+    vec3 kScatter = vec3(0.0);
+    vec2 kOrbit = vec2(cos(kAngle), sin(kAngle));
+    for (int kI = 0; kI < 24; ++kI) {
+        float kT = kSpan.x + (float(kI) + 0.5) * kStep;
+        vec3 kQ = kRo + kRd * kT;
+        float kLift = kQ.y - kCrestY(kQ.x);
+        float kLiftMask = smoothstep(-0.05, 0.15, kLift) * exp(-max(kLift, 0.0) * 3.4);
+        float kCross = kQ.z - kRidgeZ(kQ.x) - 0.32 - max(kLift, 0.0) * 1.1;
+        float kWidth = 0.23 + max(kLift, 0.0) * 0.65;
+        float kBand = exp(-kCross * kCross / (kWidth * kWidth));
+        float kBillow = kFbm(kQ.xz * vec2(1.6, 2.4) + kQ.y * 1.7 + kOrbit * 0.72);
+        float kWisps = kValue(kQ.xz * vec2(5.1, 2.7) + vec2(cos(2.0 * kAngle), sin(2.0 * kAngle)) * 0.8);
+        float kDensity = kLiftMask * kBand * smoothstep(0.15, 0.75, kEnvelope(kQ.x)) *
+                         smoothstep(0.28, 0.73, kBillow) * (0.55 + 0.45 * kWisps) * 1.0;
+        float kAlpha = 1.0 - exp(-kDensity * kStep);
+        vec3 kDust = mix(vec3(0.15, 0.065, 0.105), vec3(0.69, 0.27, 0.075),
+                         exp(-max(kLift, 0.0) * 2.0));
+        kScatter += kTrans * kAlpha * kDust;
+        kTrans *= 1.0 - kAlpha;
+    }
+    return kUnder * kTrans + kScatter;
+}
+
+void main() {
+    vec3 kEye; mat3 kBasis; kCamera(kEye, kBasis);
+    vec2 kScreen = (2.0 * gl_FragCoord.xy - kResolution) / kResolution.y;
+    vec3 kRd = normalize(kBasis * vec3(kScreen, kLens()));
+    float kT = kTrace(kEye, kRd);
+    vec3 kC;
+    if (kT < kFar - 0.01) {
+        vec3 kP = kEye + kRd * kT;
+        kC = kShadeSand(kP, kRd, kT);
+        gl_FragDepth = kDepth(dot(kP - kEye, kBasis[2]));
+    } else {
+        kC = kSky(kRd);
+        gl_FragDepth = 1.0;
+    }
+    kC = kSandHaze(kEye, kRd, kT, kC);
+    kFrag = vec4(max(kC, 0.0) * kStoreScale, 1.0);
+}
+</script>
+
+<script id="k-dust-vs" type="x-shader/x-vertex">#version 300 es
+precision highp float;
+layout(location=0) in vec4 kSeed;
+layout(location=1) in vec4 kDrift;
+out vec3 kTint;
+out float kOpacity;
+out float kSoftness;
+uniform float kStoreScale;
+uniform float kPointLimit;
+/*__WORLD__*/
+void main() {
+    vec3 kEye; mat3 kBasis; kCamera(kEye, kBasis);
+    float kA = kAngle * kDrift.w + kSeed.y * kTAU;
+    float kTravel = 0.5 + 0.5 * sin(kA);
+    float kAlive = pow(max(cos(kA), 0.0), 2.0);
+    float kX = kSeed.x + kTravel * kDrift.x;
+    float kZ = kRidgeZ(kSeed.x) + 0.14 + kTravel * kDrift.y;
+    float kY = kCrestY(kSeed.x) + 0.035 + 0.13 * sin(kA + 0.8) + kTravel * kDrift.z;
+    kY += 0.045 * sin(3.0 * kA + kSeed.x);
+    vec3 kP = vec3(kX, kY, kZ);
+    vec3 kV = transpose(kBasis) * (kP - kEye);
+    float kAspect = kResolution.x / kResolution.y;
+    float kZndc = (kFar + kNear) / (kFar - kNear) * kV.z - 2.0 * kFar * kNear / (kFar - kNear);
+    gl_Position = vec4(kV.x * kLens() / kAspect, kV.y * kLens(), kZndc, kV.z);
+    float kDiameter = kSeed.z * kResolution.y * kLens() / max(kV.z, 0.1);
+    gl_PointSize = clamp(kDiameter, 1.0, kPointLimit);
+    float kSubpixel = min(1.0, kDiameter * kDiameter);
+    kOpacity = kAlive * kSeed.w * kSubpixel * smoothstep(0.1, 0.7, kEnvelope(kSeed.x));
+    kOpacity *= exp(-length(kP - kEye) * 0.016);
+    kSoftness = smoothstep(0.025, 0.065, kSeed.z);
+    kTint = mix(vec3(0.63, 0.26, 0.12), vec3(1.3, 0.62, 0.24), kSeed.w) * kStoreScale;
+}
+</script>
+
+<script id="k-dust-fs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec3 kTint;
+in float kOpacity;
+in float kSoftness;
+out vec4 kFrag;
+void main() {
+    vec2 kP = gl_PointCoord * 2.0 - 1.0;
+    float kR2 = dot(kP, kP);
+    if (kR2 > 1.0) discard;
+    float kA = exp(-kR2 * mix(4.3, 2.7, kSoftness)) * (1.0 - smoothstep(0.5, 1.0, kR2));
+    kFrag = vec4(kTint * kOpacity * kA, 0.0);
+}
+</script>
+
+<script id="k-bloom-fs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec2 kUv;
+out vec4 kFrag;
+uniform sampler2D kSource;
+uniform vec2 kTexel;
+uniform vec2 kDirection;
+uniform float kStoreScale;
+uniform int kExtract;
+
+vec3 kBright(vec2 kUvAt) {
+    vec3 kC = texture(kSource, kUvAt).rgb;
+    if (kExtract == 1) {
+        kC /= kStoreScale;
+        float kMax = max(kC.r, max(kC.g, kC.b));
+        float kKnee = smoothstep(0.34, 1.10, kMax);
+        kC *= kKnee * kStoreScale;
+    }
+    return kC;
+}
+void main() {
+    vec2 kD = kTexel * kDirection;
+    vec3 kC = kBright(kUv) * 0.227027;
+    kC += (kBright(kUv + kD * 1.384615) + kBright(kUv - kD * 1.384615)) * 0.316216;
+    kC += (kBright(kUv + kD * 3.230769) + kBright(kUv - kD * 3.230769)) * 0.070270;
+    kFrag = vec4(kC, 1.0);
+}
+</script>
+
+<script id="k-finish-fs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec2 kUv;
+out vec4 kFrag;
+uniform sampler2D kSource;
+uniform sampler2D kBloom;
+uniform vec2 kResolution;
+uniform float kStoreScale;
+uniform float kAngle;
+
+float kGrainHash(vec2 kP) {
+    vec3 kV = fract(vec3(kP.xyx) * 0.1031);
+    kV += dot(kV, kV.yzx + 33.33);
+    return fract((kV.x + kV.y) * kV.z);
+}
+vec3 kAces(vec3 kC) {
+    return clamp((kC * (2.51 * kC + 0.03)) / (kC * (2.43 * kC + 0.59) + 0.14), 0.0, 1.0);
+}
+void main() {
+    vec2 kRad = kUv - 0.5;
+    vec2 kCa = kRad * dot(kRad, kRad) * 0.65 / kResolution;
+    vec3 kC = vec3(texture(kSource, kUv + kCa).r,
+                  texture(kSource, kUv).g,
+                  texture(kSource, kUv - kCa).b) / kStoreScale;
+    vec3 kGlow = texture(kBloom, kUv).rgb / kStoreScale;
+    kC += kGlow * 0.27;
+    float kVignette = 1.0 - 0.28 * smoothstep(0.08, 0.65, dot(kRad, kRad));
+    kC *= kVignette * 1.12;
+    kC = pow(kAces(kC), vec3(1.0 / 2.2));
+    float kFilm = (kGrainHash(gl_FragCoord.xy) - 0.5) * (0.0035 + 0.0005 * sin(kAngle));
+    kC += kFilm;
+    kFrag = vec4(clamp(kC, 0.0, 1.0), 1.0);
+}
+</script>
+
+<script>
+(() => {
+  'use strict';
+  const kPERIOD_MS = 10000;
+  const kCanvas = document.getElementById('k-canvas');
+  const kGl = kCanvas.getContext('webgl2', {
+    alpha: false, antialias: false, depth: true, stencil: false,
+    premultipliedAlpha: false, preserveDrawingBuffer: false, powerPreference: 'high-performance'
+  });
+  if (!kGl) { console.error('Velvet Dunes: WebGL2 is required.'); return; }
+  const kParams = new URLSearchParams(location.search);
+  const kTraw = kParams.get('t');
+  const kTnumber = kTraw !== null && kTraw.trim() !== '' ? Number(kTraw) : NaN;
+  const kFrozen = Number.isFinite(kTnumber);
+  const kWrap = kP => ((kP % 1) + 1) % 1;
+  const kStillPhase = kFrozen ? kWrap(kTnumber) : 0;
+  const kWorld = document.getElementById('k-world').textContent;
+  let kRenderer = null, kFrameId = 0, kLost = false;
+
+  function kMulberry32(kSeed) {
+    return () => {
+      let kV = kSeed += 0x6D2B79F5;
+      kV = Math.imul(kV ^ (kV >>> 15), kV | 1);
+      kV ^= kV + Math.imul(kV ^ (kV >>> 7), kV | 61);
+      return ((kV ^ (kV >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function kCompile(kKind, kId) {
+    const kShader = kGl.createShader(kKind);
+    const kSource = document.getElementById(kId).textContent.replace('/*__WORLD__*/', kWorld);
+    kGl.shaderSource(kShader, kSource);
+    kGl.compileShader(kShader);
+    const kLog = kGl.getShaderInfoLog(kShader);
+    if (kLog && kLog.trim()) console.warn('Velvet Dunes shader log [' + kId + ']:\n' + kLog);
+    if (!kGl.getShaderParameter(kShader, kGl.COMPILE_STATUS)) {
+      console.error('Velvet Dunes shader failed [' + kId + ']:\n' + kLog);
+      kGl.deleteShader(kShader);
+      throw new Error('Shader compilation failed: ' + kId);
+    }
+    return kShader;
+  }
+
+  function kProgram(kVertexId, kFragmentId) {
+    const kProgramObject = kGl.createProgram();
+    const kVs = kCompile(kGl.VERTEX_SHADER, kVertexId);
+    const kFs = kCompile(kGl.FRAGMENT_SHADER, kFragmentId);
+    kGl.attachShader(kProgramObject, kVs); kGl.attachShader(kProgramObject, kFs);
+    kGl.linkProgram(kProgramObject);
+    const kLog = kGl.getProgramInfoLog(kProgramObject);
+    if (kLog && kLog.trim()) console.warn('Velvet Dunes program log:\n' + kLog);
+    kGl.deleteShader(kVs); kGl.deleteShader(kFs);
+    if (!kGl.getProgramParameter(kProgramObject, kGl.LINK_STATUS)) {
+      console.error('Velvet Dunes link failed:\n' + kLog);
+      kGl.deleteProgram(kProgramObject);
+      throw new Error('Program link failed: ' + kFragmentId);
+    }
+    const kLocations = new Map();
+    return {
+      object: kProgramObject,
+      use() { kGl.useProgram(kProgramObject); },
+      loc(kName) {
+        if (!kLocations.has(kName)) kLocations.set(kName, kGl.getUniformLocation(kProgramObject, kName));
+        return kLocations.get(kName);
+      }
+    };
+  }
+
+  function kCreateRenderer() {
+    const kScene = kProgram('k-fullscreen-vs', 'k-scene-fs');
+    const kDust = kProgram('k-dust-vs', 'k-dust-fs');
+    const kBlur = kProgram('k-fullscreen-vs', 'k-bloom-fs');
+    const kFinish = kProgram('k-fullscreen-vs', 'k-finish-fs');
+    let kUseHalf = !!kGl.getExtension('EXT_color_buffer_float');
+    const kEmptyVao = kGl.createVertexArray();
+    const kDustVao = kGl.createVertexArray();
+    const kDustVbo = kGl.createBuffer();
+    const kDustCount = 576;
+    const kRng = kMulberry32(0x56454C56);
+    const kData = new Float32Array(kDustCount * 8);
+    for (let kI = 0; kI < kDustCount; ++kI) {
+      const kX = (kRng() + kRng() - 1) * 8.6;
+      const kLarge = kI % 13 === 0;
+      kData.set([
+        kX, kRng(), kLarge ? 0.032 + kRng() * 0.042 : 0.004 + kRng() * 0.013,
+        kLarge ? 0.025 + kRng() * 0.040 : 0.10 + kRng() * 0.34,
+        0.45 + kRng() * 1.65, 0.20 + kRng() * 0.90,
+        0.10 + kRng() * 0.70, kI % 9 === 0 ? 2 : 1
+      ], kI * 8);
+    }
+    kGl.bindVertexArray(kDustVao);
+    kGl.bindBuffer(kGl.ARRAY_BUFFER, kDustVbo);
+    kGl.bufferData(kGl.ARRAY_BUFFER, kData, kGl.STATIC_DRAW);
+    kGl.enableVertexAttribArray(0); kGl.vertexAttribPointer(0, 4, kGl.FLOAT, false, 32, 0);
+    kGl.enableVertexAttribArray(1); kGl.vertexAttribPointer(1, 4, kGl.FLOAT, false, 32, 16);
+    kGl.bindVertexArray(kEmptyVao);
+    const kPointRange = kGl.getParameter(kGl.ALIASED_POINT_SIZE_RANGE);
+    const kMaxSize = Math.min(kGl.getParameter(kGl.MAX_TEXTURE_SIZE), kGl.getParameter(kGl.MAX_RENDERBUFFER_SIZE));
+    let kWidth = 0, kHeight = 0, kTargets = null;
+
+    function kTarget(kW, kH, kWithDepth) {
+      const kTex = kGl.createTexture();
+      kGl.bindTexture(kGl.TEXTURE_2D, kTex);
+      kGl.texParameteri(kGl.TEXTURE_2D, kGl.TEXTURE_MIN_FILTER, kGl.LINEAR);
+      kGl.texParameteri(kGl.TEXTURE_2D, kGl.TEXTURE_MAG_FILTER, kGl.LINEAR);
+      kGl.texParameteri(kGl.TEXTURE_2D, kGl.TEXTURE_WRAP_S, kGl.CLAMP_TO_EDGE);
+      kGl.texParameteri(kGl.TEXTURE_2D, kGl.TEXTURE_WRAP_T, kGl.CLAMP_TO_EDGE);
+      kGl.texImage2D(kGl.TEXTURE_2D, 0, kUseHalf ? kGl.RGBA16F : kGl.SRGB8_ALPHA8,
+                    kW, kH, 0, kGl.RGBA, kUseHalf ? kGl.HALF_FLOAT : kGl.UNSIGNED_BYTE, null);
+      const kFbo = kGl.createFramebuffer();
+      kGl.bindFramebuffer(kGl.FRAMEBUFFER, kFbo);
+      kGl.framebufferTexture2D(kGl.FRAMEBUFFER, kGl.COLOR_ATTACHMENT0, kGl.TEXTURE_2D, kTex, 0);
+      let kDepthBuffer = null;
+      if (kWithDepth) {
+        kDepthBuffer = kGl.createRenderbuffer();
+        kGl.bindRenderbuffer(kGl.RENDERBUFFER, kDepthBuffer);
+        kGl.renderbufferStorage(kGl.RENDERBUFFER, kGl.DEPTH_COMPONENT24, kW, kH);
+        kGl.framebufferRenderbuffer(kGl.FRAMEBUFFER, kGl.DEPTH_ATTACHMENT, kGl.RENDERBUFFER, kDepthBuffer);
+      }
+      const kOk = kGl.checkFramebufferStatus(kGl.FRAMEBUFFER) === kGl.FRAMEBUFFER_COMPLETE;
+      const kResult = { tex: kTex, fbo: kFbo, depth: kDepthBuffer, w: kW, h: kH, ok: kOk };
+      if (!kOk) kDestroyTarget(kResult);
+      return kResult;
+    }
+
+    function kDestroyTarget(kT) {
+      kGl.deleteTexture(kT.tex); kGl.deleteFramebuffer(kT.fbo);
+      if (kT.depth) kGl.deleteRenderbuffer(kT.depth);
+    }
+
+    function kResize() {
+      const kDpr = window.devicePixelRatio || 1;
+      const kCssW = Math.max(1, window.innerWidth), kCssH = Math.max(1, window.innerHeight);
+      const kScale = Math.min(kDpr, kMaxSize / kCssW, kMaxSize / kCssH);
+      const kW = Math.max(1, Math.floor(kCssW * kScale));
+      const kH = Math.max(1, Math.floor(kCssH * kScale));
+      if (kWidth === kW && kHeight === kH) return;
+      if (kTargets) kTargets.forEach(kDestroyTarget);
+      kWidth = kCanvas.width = kW; kHeight = kCanvas.height = kH;
+      const kBw = Math.max(1, Math.ceil(kW / 3)), kBh = Math.max(1, Math.ceil(kH / 3));
+      kTargets = [kTarget(kW, kH, true), kTarget(kBw, kBh, false), kTarget(kBw, kBh, false)];
+      if (kTargets.some(kT => !kT.ok) && kUseHalf) {
+        kTargets.filter(kT => kT.ok).forEach(kDestroyTarget);
+        kUseHalf = false;
+        kTargets = [kTarget(kW, kH, true), kTarget(kBw, kBh, false), kTarget(kBw, kBh, false)];
+      }
+      if (kTargets.some(kT => !kT.ok)) throw new Error('Velvet Dunes: incomplete render target.');
+    }
+
+    function kDraw(kPhase) {
+      kResize();
+      const kA = 2 * Math.PI * kWrap(kPhase);
+      const kStore = kUseHalf ? 1 : 0.5;
+      const [kImage, kGlowA, kGlowB] = kTargets;
+      kGl.bindFramebuffer(kGl.FRAMEBUFFER, kImage.fbo);
+      kGl.viewport(0, 0, kWidth, kHeight);
+      kGl.disable(kGl.BLEND); kGl.enable(kGl.DEPTH_TEST);
+      kGl.depthMask(true); kGl.depthFunc(kGl.LEQUAL);
+      kGl.clearDepth(1); kGl.clear(kGl.DEPTH_BUFFER_BIT);
+      kGl.bindVertexArray(kEmptyVao);
+      kScene.use();
+      kGl.uniform2f(kScene.loc('kResolution'), kWidth, kHeight);
+      kGl.uniform1f(kScene.loc('kAngle'), kA);
+      kGl.uniform1f(kScene.loc('kStoreScale'), kStore);
+      kGl.drawArrays(kGl.TRIANGLES, 0, 3);
+
+      kGl.enable(kGl.BLEND); kGl.blendFunc(kGl.ONE, kGl.ONE); kGl.depthMask(false);
+      kGl.bindVertexArray(kDustVao); kDust.use();
+      kGl.uniform2f(kDust.loc('kResolution'), kWidth, kHeight);
+      kGl.uniform1f(kDust.loc('kAngle'), kA);
+      kGl.uniform1f(kDust.loc('kStoreScale'), kStore);
+      kGl.uniform1f(kDust.loc('kPointLimit'), kPointRange[1]);
+      kGl.drawArrays(kGl.POINTS, 0, kDustCount);
+      kGl.disable(kGl.BLEND); kGl.disable(kGl.DEPTH_TEST); kGl.depthMask(true);
+      kGl.bindVertexArray(kEmptyVao);
+
+      kBlur.use();
+      kGl.uniform1i(kBlur.loc('kSource'), 0);
+      kGl.uniform1f(kBlur.loc('kStoreScale'), kStore);
+      kGl.activeTexture(kGl.TEXTURE0); kGl.bindTexture(kGl.TEXTURE_2D, kImage.tex);
+      kGl.bindFramebuffer(kGl.FRAMEBUFFER, kGlowA.fbo);
+      kGl.viewport(0, 0, kGlowA.w, kGlowA.h);
+      kGl.uniform2f(kBlur.loc('kTexel'), 1 / kWidth, 1 / kHeight);
+      kGl.uniform2f(kBlur.loc('kDirection'), 3.2, 0);
+      kGl.uniform1i(kBlur.loc('kExtract'), 1);
+      kGl.drawArrays(kGl.TRIANGLES, 0, 3);
+
+      kGl.bindFramebuffer(kGl.FRAMEBUFFER, kGlowB.fbo);
+      kGl.bindTexture(kGl.TEXTURE_2D, kGlowA.tex);
+      kGl.uniform2f(kBlur.loc('kTexel'), 1 / kGlowA.w, 1 / kGlowA.h);
+      kGl.uniform2f(kBlur.loc('kDirection'), 0, 1.1);
+      kGl.uniform1i(kBlur.loc('kExtract'), 0);
+      kGl.drawArrays(kGl.TRIANGLES, 0, 3);
+
+      kGl.bindFramebuffer(kGl.FRAMEBUFFER, null);
+      kGl.viewport(0, 0, kWidth, kHeight);
+      kFinish.use();
+      kGl.activeTexture(kGl.TEXTURE0); kGl.bindTexture(kGl.TEXTURE_2D, kImage.tex);
+      kGl.activeTexture(kGl.TEXTURE1); kGl.bindTexture(kGl.TEXTURE_2D, kGlowB.tex);
+      kGl.uniform1i(kFinish.loc('kSource'), 0); kGl.uniform1i(kFinish.loc('kBloom'), 1);
+      kGl.uniform2f(kFinish.loc('kResolution'), kWidth, kHeight);
+      kGl.uniform1f(kFinish.loc('kStoreScale'), kStore);
+      kGl.uniform1f(kFinish.loc('kAngle'), kA);
+      kGl.drawArrays(kGl.TRIANGLES, 0, 3);
+      kGl.activeTexture(kGl.TEXTURE0);
+    }
+    return { draw: kDraw };
+  }
+
+  function kFrame(kTimestamp) {
+    if (kLost) return;
+    try {
+      // No clock reads, frame deltas, integration or history enter the scene.
+      const kPhase = kFrozen ? kStillPhase : ((kTimestamp / 1000) % (kPERIOD_MS / 1000)) / (kPERIOD_MS / 1000);
+      kRenderer.draw(kPhase);
+    } catch (kError) {
+      console.error('Velvet Dunes rendering failed:', kError);
+      return;
+    }
+    if (!kFrozen) kFrameId = requestAnimationFrame(kFrame);
+  }
+
+  function kStart() {
+    try {
+      kRenderer = kCreateRenderer();
+      kFrameId = requestAnimationFrame(kFrame);
+    } catch (kError) { console.error('Velvet Dunes initialization failed:', kError); }
+  }
+  window.addEventListener('resize', () => {
+    if (kFrozen && !kLost) { cancelAnimationFrame(kFrameId); kFrameId = requestAnimationFrame(kFrame); }
+  }, { passive: true });
+  kCanvas.addEventListener('webglcontextlost', kEvent => {
+    kEvent.preventDefault(); kLost = true; cancelAnimationFrame(kFrameId);
+  });
+  kCanvas.addEventListener('webglcontextrestored', () => { kLost = false; kStart(); });
+  kStart();
+})();
+</script>
+</body>
+</html>

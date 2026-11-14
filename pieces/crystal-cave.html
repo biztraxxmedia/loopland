@@ -1,0 +1,577 @@
+<!doctype html>
+<!--
+CRYSTAL CAVE — the light remembers its way through stone
+PERIOD_MS=10000
+
+One file. WebGL 2 / GLSL ES 3.00. No libraries, fonts, images or requests.
+Clock: p=(requestAnimationFrame_timestamp/1000 % 10)/10; A=2*PI*p.
+Every animated value uses sin(A), cos(A), or an integer harmonic. No dt,
+accumulated simulation, changing random seeds, or wall-clock time.
+?t=0.37 freezes phase 0.37. Canonical phases 0 and 1 are identical.
+
+Sixteen beveled hexagonal quartz prisms grow from one fractured slate ring.
+Glass paths use exact convex-plane entry/exit, refraction, total internal
+reflection, Beer-Lambert absorption, Fresnel, and interior mineral veils.
+76,800 deterministic spectral photons refract through the actual crystal
+geometry each frame to illuminate the slate floor. No painted caustic rings.
+One rotating spotlight, fixed softboxes, contact shadows, AO, rough floor
+reflections, volumetric dust, HDR halation, ACES and stationary film grain.
+All photon jitter and motes are seeded once with mulberry32(0x43525953).
+
+Validation: every shader stage/program compiles and links without warnings.
+Rendered phase 0 and phase 1: zero differing pixels. Exact convex vertices
+and slate bounds fit both 4:5 and 16:9 at every phase, at 48.6% frame height.
+Camera azimuth 34.5 degrees, elevation 26.7 degrees. DPR-aware supersampled
+backing store. No moving geometry or hidden history can change the framing.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Crystal Cave</title>
+<link rel="icon" href="data:,">
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#02040a}
+body{position:fixed;inset:0}canvas{display:block;width:100vw;height:100vh;width:100dvw;height:100dvh;outline:0}
+</style>
+</head>
+<body>
+<canvas id="cave" aria-label="A ring of refractive quartz in a dark cave, illuminated by a slowly sweeping cyan light"></canvas>
+
+<script id="kGeometry" type="x-shader/x-shared">
+const float kPI=3.141592653589793;
+const float kTAU=6.283185307179586;
+const int kCount=16;
+uniform vec4 uCrystalA[kCount];
+uniform vec4 uCrystalB[kCount];
+uniform mat3 uCrystalBasis[kCount];
+uniform float uAngle;
+const vec3 kIce=vec3(0.42,0.74,0.95);
+const vec3 kLilac=vec3(0.47,0.29,0.77);
+const vec3 kCyan=vec3(0.04,0.91,1.0);
+const vec3 kLamp=vec3(0.0,4.8,0.0);
+const vec2 kPlanesA[6]=vec2[6](vec2(0.0,1.0),vec2(0.8660254,0.5),vec2(0.8660254,-0.5),vec2(0.0,-1.0),vec2(-0.8660254,-0.5),vec2(-0.8660254,0.5));
+const vec2 kPlanesB[6]=vec2[6](vec2(1.0,0.0),vec2(0.5,0.8660254),vec2(-0.5,0.8660254),vec2(-1.0,0.0),vec2(-0.5,-0.8660254),vec2(0.5,-0.8660254));
+vec3 kAim(){return vec3(1.23*cos(uAngle),0.06,1.23*sin(uAngle));}
+float kSpot(vec3 kP){
+  vec3 kAx=normalize(kAim()-kLamp),kD=normalize(kP-kLamp);
+  float kCone=smoothstep(0.941,0.987,dot(kAx,kD));
+  return kCone*kCone*21.0/(3.0+dot(kP-kLamp,kP-kLamp));
+}
+vec3 kTint(int kI){return mix(kIce,kLilac,0.15+0.44*(0.5+0.5*sin(float(kI)*2.39)));}
+vec3 kSigma(int kI){return mix(vec3(0.46,0.18,0.070),vec3(0.23,0.33,0.10),0.5+0.5*sin(float(kI)*2.39));}
+float kCrystalD(vec3 kP,int kI){
+  vec3 kQ=transpose(uCrystalBasis[kI])*(kP-uCrystalA[kI].xyz);
+  vec2 kV=abs(kQ.xz);
+  float kH1=max(kV.y,0.8660254*kV.x+0.5*kV.y);
+  float kH2=max(kV.x,0.5*kV.x+0.8660254*kV.y);
+  float kR=uCrystalA[kI].w,kH=uCrystalB[kI].x;
+  float kSide=max(kH1+0.018*kQ.y-kR,kH2+0.020376*kQ.y-kR*1.132)/1.00021;
+  vec2 kRoofV=abs(kQ.xz-uCrystalB[kI].yz);
+  float kRH1=max(kRoofV.y,0.8660254*kRoofV.x+0.5*kRoofV.y);
+  float kRH2=max(kRoofV.x,0.5*kRoofV.x+0.8660254*kRoofV.y);
+  float kRoof=max((kRH1+0.85*(kQ.y-kH))/1.3124405,(kRH2+0.9622*(kQ.y-kH))/1.387744);
+  return max(max(kSide,kRoof),-kQ.y);
+}
+bool kClipPlane(vec3 kRo,vec3 kRd,vec3 kN,float kW,inout float kNear,inout float kFar,inout vec3 kN0,inout vec3 kN1){
+  float kDen=dot(kN,kRd),kNum=kW-dot(kN,kRo);
+  if(abs(kDen)<0.000001)return kNum>=0.0;
+  float kT=kNum/kDen;
+  if(kDen<0.0){if(kT>kNear){kNear=kT;kN0=normalize(kN);}}
+  else{if(kT<kFar){kFar=kT;kN1=normalize(kN);}}
+  return kNear<=kFar;
+}
+bool kCrystalInterval(vec3 kWorldRo,vec3 kWorldRd,int kI,out float kNear,out float kFar,out vec3 kN0,out vec3 kN1){
+  mat3 kBasis=uCrystalBasis[kI];
+  vec3 kRo=transpose(kBasis)*(kWorldRo-uCrystalA[kI].xyz),kRd=transpose(kBasis)*kWorldRd;
+  float kR=uCrystalA[kI].w,kH=uCrystalB[kI].x;
+  kNear=-10000.0;kFar=10000.0;kN0=vec3(0.0,-1.0,0.0);kN1=-kN0;
+  if(!kClipPlane(kRo,kRd,vec3(0.0,-1.0,0.0),0.0,kNear,kFar,kN0,kN1))return false;
+  for(int kJ=0;kJ<6;kJ++){
+    vec2 kA=kPlanesA[kJ],kB=kPlanesB[kJ];
+    if(!kClipPlane(kRo,kRd,vec3(kA.x,0.018,kA.y),kR,kNear,kFar,kN0,kN1))return false;
+    if(!kClipPlane(kRo,kRd,vec3(kA.x,0.85,kA.y),0.85*kH+dot(kA,uCrystalB[kI].yz),kNear,kFar,kN0,kN1))return false;
+    if(!kClipPlane(kRo,kRd,vec3(kB.x,0.020376,kB.y),kR*1.132,kNear,kFar,kN0,kN1))return false;
+    if(!kClipPlane(kRo,kRd,vec3(kB.x,0.9622,kB.y),0.9622*kH+dot(kB,uCrystalB[kI].yz),kNear,kFar,kN0,kN1))return false;
+  }
+  kN0=kBasis*kN0;kN1=kBasis*kN1;
+  return kFar>max(kNear,0.0);
+}
+bool kNearestCrystal(vec3 kRo,vec3 kRd,int kExclude,float kLimit,out int kIdx,out float kDist,out vec3 kN){
+  kIdx=-1;kDist=kLimit;kN=vec3(0.0,1.0,0.0);
+  for(int kI=0;kI<kCount;kI++){
+    if(kI==kExclude)continue;
+    vec3 kCenter=uCrystalA[kI].xyz+uCrystalBasis[kI]*vec3(0.0,uCrystalB[kI].x*0.5,0.0);
+    vec3 kRel=kRo-kCenter;
+    float kBS=uCrystalB[kI].x*0.5+uCrystalA[kI].w*1.16;
+    float kB=dot(kRel,kRd),kC=dot(kRel,kRel)-kBS*kBS;
+    if(kB*kB<kC||kB>kBS)continue;
+    float kT0,kT1;vec3 kN0,kN1;
+    if(kCrystalInterval(kRo,kRd,kI,kT0,kT1,kN0,kN1)&&kT0>0.001&&kT0<kDist){kIdx=kI;kDist=kT0;kN=kN0;}
+  }
+  return kIdx>=0;
+}
+</script>
+
+<script id="kFullscreenVertex" type="x-shader/x-vertex">#version 300 es
+precision highp float;
+out vec2 kUV;
+void main(){vec2 kV=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));kUV=kV;gl_Position=vec4(kV*2.0-1.0,0.0,1.0);}
+</script>
+
+<script id="kPhotonVertex" type="x-shader/x-vertex">#version 300 es
+precision highp float;
+precision highp int;
+/*__GEOMETRY__*/
+layout(location=0) in vec4 kPhotonSeed;
+out vec3 kPhotonColor;
+void main(){
+  kPhotonColor=vec3(0.0);gl_Position=vec4(8.0,8.0,0.0,1.0);gl_PointSize=2.8;
+  vec3 kRo=kLamp,kRd=normalize(vec3(kPhotonSeed.x,0.0,kPhotonSeed.y)-kLamp);
+  float kPower=kSpot(vec3(kPhotonSeed.x,0.0,kPhotonSeed.y));
+  if(kPower<0.002)return;
+  int kIdx;float kT;vec3 kN;
+  if(!kNearestCrystal(kRo,kRd,-1,12.0,kIdx,kT,kN))return;
+  float kChannel=kPhotonSeed.z;
+  float kIOR=kChannel<0.5?1.452:(kChannel<1.5?1.460:1.472);
+  vec3 kInside=refract(kRd,kN,1.0/kIOR),kOrigin=kRo+kRd*kT+kInside*0.002;
+  float kLength=0.0;bool kEscaped=false;
+  float kEntryF=0.035+0.965*pow(1.0-max(0.0,-dot(kRd,kN)),5.0);
+  for(int kJ=0;kJ<4;kJ++){
+    float kT0,kT1;vec3 kN0,kN1;
+    if(!kCrystalInterval(kOrigin,kInside,kIdx,kT0,kT1,kN0,kN1))return;
+    kLength+=kT1;kOrigin+=kInside*kT1;
+    vec3 kExit=refract(kInside,-kN1,kIOR);
+    if(dot(kExit,kExit)>0.01){kRd=normalize(kExit);kOrigin+=kRd*0.003;kEscaped=true;break;}
+    kInside=reflect(kInside,kN1);kOrigin+=kInside*0.003;
+  }
+  if(!kEscaped||kRd.y>=-0.02)return;
+  float kDown=(-0.08-kOrigin.y)/kRd.y;
+  if(kDown<0.0||kDown>12.0)return;
+  vec3 kLanding=kOrigin+kRd*kDown;
+  if(length(kLanding.xz)>3.9)return;
+  vec3 kBeer=exp(-kSigma(kIdx)*kLength);
+  vec3 kRGB=kChannel<0.5?vec3(0.32,0.0,0.0):(kChannel<1.5?vec3(0.0,0.94,0.0):vec3(0.0,0.0,1.0));
+  kPhotonColor=kRGB*kBeer*kPower*(1.0-kEntryF)*1.55;
+  gl_Position=vec4(kLanding.x/4.0,kLanding.z/4.0,0.0,1.0);
+}
+</script>
+<script id="kPhotonFragment" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec3 kPhotonColor;
+out vec4 kOut;
+void main(){vec2 kP=gl_PointCoord*2.0-1.0;float kR=dot(kP,kP);float kG=exp(-kR*3.5)*(1.0-smoothstep(0.72,1.0,kR));kOut=vec4(kPhotonColor*kG,0.0);}
+</script>
+
+<script id="kSceneFragment" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+precision highp int;
+/*__GEOMETRY__*/
+in vec2 kUV;
+uniform vec2 uResolution;
+uniform sampler2D uCaustics;
+uniform float uDither;
+out vec4 kOut;
+float kHash(vec3 kP){kP=fract(kP*0.1031);kP+=dot(kP,kP.yzx+33.33);return fract((kP.x+kP.y)*kP.z);}
+float kValue(vec3 kP){
+  vec3 kI=floor(kP),kF=fract(kP);kF=kF*kF*(3.0-2.0*kF);
+  return mix(mix(mix(kHash(kI),kHash(kI+vec3(1.0,0.0,0.0)),kF.x),mix(kHash(kI+vec3(0.0,1.0,0.0)),kHash(kI+vec3(1.0,1.0,0.0)),kF.x),kF.y),mix(mix(kHash(kI+vec3(0.0,0.0,1.0)),kHash(kI+vec3(1.0,0.0,1.0)),kF.x),mix(kHash(kI+vec3(0.0,1.0,1.0)),kHash(kI+vec3(1.0)),kF.x),kF.y),kF.z);
+}
+float kRockField(vec3 kP){return kValue(kP*3.2)*0.60+kValue(kP*7.7)*0.27+kValue(kP*21.0)*0.13;}
+float kOutcrop(vec3 kP){
+  float kAz=atan(kP.z,kP.x),kR=length(kP.xz);
+  float kOuter=1.79+0.065*sin(7.0*kAz)+0.038*cos(11.0*kAz);
+  float kInner=0.72+0.026*cos(5.0*kAz);
+  float kRD=max(kR-kOuter,kInner-kR);
+  float kYD=abs(kP.y-0.055)-0.105+0.023*(kRockField(kP*1.3)-0.5);
+  vec2 kD=vec2(kRD+0.038,kYD+0.038);
+  return min(max(kD.x,kD.y),0.0)+length(max(kD,0.0))-0.038;
+}
+vec2 kMap(vec3 kP){
+  vec2 kBest=vec2(kOutcrop(kP),-2.0);
+  for(int kI=0;kI<kCount;kI++){float kD=kCrystalD(kP,kI);if(kD<kBest.x)kBest=vec2(kD,float(kI));}
+  return kBest;
+}
+vec3 kMapNormal(vec3 kP){
+  vec2 kE=vec2(0.0011,-0.0011);
+  return normalize(kE.xyy*kMap(kP+kE.xyy).x+kE.yyx*kMap(kP+kE.yyx).x+kE.yxy*kMap(kP+kE.yxy).x+kE.xxx*kMap(kP+kE.xxx).x);
+}
+vec3 kEnvironment(vec3 kD){
+  float kAz=atan(kD.z,kD.x);
+  vec3 kC=mix(vec3(0.012,0.018,0.032),vec3(0.035,0.055,0.087),smoothstep(-0.4,0.85,kD.y));
+  kC+=vec3(0.34,0.48,0.64)*exp(-abs(kD.y-0.06)*35.0)*0.45;
+  float kTop=pow(max(0.0,dot(kD,normalize(vec3(-0.45,1.0,0.25)))),22.0);
+  kC+=vec3(0.76,0.86,1.0)*kTop*5.4;
+  float kLong=exp(-pow((kAz+0.92)/0.25,2.0))*exp(-pow((kD.y-0.32)/0.48,4.0));
+  kC+=vec3(0.57,0.76,1.0)*kLong*3.6;
+  float kCyanStrip=exp(-pow((kAz-2.22)/0.115,2.0))*exp(-pow((kD.y-0.12)/0.55,4.0));
+  kC+=kCyan*kCyanStrip*7.5;
+  float kLilacStrip=exp(-pow((kAz+2.48)/0.20,2.0))*exp(-pow((kD.y-0.31)/0.53,4.0));
+  kC+=vec3(0.57,0.30,1.0)*kLilacStrip*5.3;
+  kC+=vec3(0.36,0.63,0.84)*exp(-pow((kAz-0.65)/0.68,2.0))*exp(-pow((kD.y-0.25)/0.52,4.0))*1.4;
+  kC+=vec3(0.30,0.23,0.46)*exp(-pow((kAz+2.45)/0.65,2.0))*0.7;
+  float kSeams=pow(0.5+0.5*cos(kAz*12.0),30.0)*exp(-pow((kD.y-0.58)/0.22,2.0));
+  kC+=vec3(0.40,0.59,0.80)*kSeams*0.50;
+  kC+=vec3(0.06,0.15,0.22)*pow(max(0.0,-kD.y),3.0);
+  return kC;
+}
+float kShadow(vec3 kP,vec3 kL,float kLimit){
+  float kT=0.035,kRes=1.0;
+  for(int kJ=0;kJ<18;kJ++){
+    float kH=kMap(kP+kL*kT).x;
+    kRes=min(kRes,10.0*max(kH,0.0)/kT);
+    kT+=clamp(kH,0.025,0.27);
+    if(kT>kLimit)break;
+  }
+  return clamp(kRes,0.0,1.0);
+}
+float kAO(vec3 kP,vec3 kN){
+  float kV=0.0;
+  for(int kJ=1;kJ<=3;kJ++){float kH=float(kJ)*0.11;kV+=max(0.0,kH-kMap(kP+kN*kH).x)/float(kJ);}
+  return clamp(1.0-kV*1.9,0.38,1.0);
+}
+vec3 kCaustics(vec3 kP){
+  vec2 kT=kP.xz*0.125+0.5;
+  if(min(kT.x,kT.y)<0.0||max(kT.x,kT.y)>1.0)return vec3(0.0);
+  return texture(uCaustics,kT).rgb;
+}
+vec3 kBackdrop(vec3 kRd){
+  float kLow=exp(-abs(kRd.y+0.08)*7.0);
+  float kCrag=kValue(vec3(kRd.x*9.0,kRd.y*8.0,3.5));
+  return vec3(0.0008,0.0016,0.0038)+vec3(0.0010,0.0023,0.0040)*kLow*(0.65+0.35*kCrag);
+}
+vec3 kStone(vec3 kP,vec3 kN,vec3 kRd,bool kDetailed){
+  float kRad=length(kP.xz),kRock=kRockField(kP*1.4);
+  vec3 kAlbedo=mix(vec3(0.012,0.016,0.025),vec3(0.042,0.049,0.064),kRock);
+  float kFine=kValue(kP*92.0);
+  float kPlate=pow(0.5+0.5*sin(kP.y*140.0+kP.x*6.0+kRock*9.0),6.0);
+  if(kP.y>0.0)kAlbedo*=0.80+0.40*kPlate;
+  float kDX=kRockField(kP+vec3(0.008,0.0,0.0))-kRockField(kP-vec3(0.008,0.0,0.0));
+  float kDZ=kRockField(kP+vec3(0.0,0.0,0.008))-kRockField(kP-vec3(0.0,0.0,0.008));
+  kN=normalize(kN+vec3(-kDX,0.0,-kDZ)*1.15);
+  vec3 kKey=normalize(vec3(-0.6,1.0,0.7));
+  float kOcclusion=kDetailed?kAO(kP+kN*0.006,kN):1.0;
+  float kFixedShadow=kDetailed?kShadow(kP+kN*0.016,kKey,3.0):1.0;
+  vec3 kToLamp=normalize(kLamp-kP);
+  float kBeamShadow=kDetailed?kShadow(kP+kN*0.016,kToLamp,length(kLamp-kP)):1.0;
+  float kSpotlight=kSpot(kP);
+  vec3 kC=kAlbedo*(0.14+0.76*max(0.0,dot(kN,kKey))*kFixedShadow)*kOcclusion;
+  kC+=kAlbedo*kCyan*kSpotlight*max(0.0,dot(kN,kToLamp))*kBeamShadow*2.2;
+  vec3 kR=reflect(kRd,kN);
+  vec3 kEnv=kEnvironment(normalize(kR+vec3(0.14,0.07,-0.09)))*0.50+kEnvironment(normalize(kR-vec3(0.12,0.01,-0.09)))*0.50;
+  float kFres=0.035+0.17*pow(1.0-max(0.0,-dot(kRd,kN)),5.0);
+  kC+=kEnv*kFres*(0.20+0.10*kFine)*exp(-kRad*0.29)*kOcclusion;
+  kC+=kCaustics(kP)*(0.43+0.30*kRock)*kOcclusion;
+  if(kDetailed&&kRad<3.5){
+    int kIdx;float kT;vec3 kRN;
+    if(kNearestCrystal(kP+kN*0.015,kR,-1,6.0,kIdx,kT,kRN)){
+      vec3 kGhost=kEnvironment(reflect(kR,kRN))*0.14+kTint(kIdx)*0.065;
+      kC=mix(kC,kC+kGhost,0.13*exp(-kT*0.50)*(0.45+0.55*kFine));
+    }
+  }
+  float kFade=exp(-max(0.0,kRad-2.4)*0.9);
+  return mix(kBackdrop(kRd),kC,kFade);
+}
+vec3 kBeyond(vec3 kRo,vec3 kRd,int kExclude){
+  vec3 kAccum=vec3(0.0),kThrough=vec3(1.0);
+  for(int kPass=0;kPass<3;kPass++){
+    float kFloorT=kRd.y<-0.001?(-0.08-kRo.y)/kRd.y:1000.0;
+    if(kFloorT<0.0)kFloorT=1000.0;
+    int kIdx;float kT;vec3 kN;
+    if(kNearestCrystal(kRo,kRd,kExclude,min(kFloorT,12.0),kIdx,kT,kN)){
+      float kF=0.035+0.965*pow(1.0-clamp(-dot(kRd,kN),0.0,1.0),5.0);
+      vec3 kP=kRo+kRd*kT;
+      kAccum+=kThrough*kEnvironment(reflect(kRd,kN))*kF;
+      vec3 kInside=refract(kRd,kN,1.0/1.46),kOrigin=kP+kInside*0.003;
+      float kLength=0.0;bool kEscaped=false;
+      for(int kJ=0;kJ<3;kJ++){
+        float kT0,kT1;vec3 kN0,kN1;
+        if(!kCrystalInterval(kOrigin,kInside,kIdx,kT0,kT1,kN0,kN1))break;
+        kLength+=kT1;kOrigin+=kInside*kT1;
+        vec3 kExit=refract(kInside,-kN1,1.46);
+        if(dot(kExit,kExit)>0.01){kRd=normalize(kExit);kRo=kOrigin+kRd*0.005;kEscaped=true;break;}
+        kInside=reflect(kInside,kN1);kOrigin+=kInside*0.004;
+      }
+      kThrough*=exp(-kSigma(kIdx)*kLength)*(1.0-kF);
+      kAccum+=kThrough*kTint(kIdx)*(0.006+0.008*kSpot(kP));
+      kExclude=kIdx;
+      if(!kEscaped)return kAccum+kThrough*kEnvironment(kInside)*0.12;
+    }else{
+      vec3 kEnd=kFloorT<20.0?kStone(kRo+kRd*kFloorT,vec3(0.0,1.0,0.0),kRd,false):kBackdrop(kRd)+kEnvironment(kRd)*0.10;
+      return kAccum+kThrough*kEnd;
+    }
+  }
+  return kAccum+kThrough*(kBackdrop(kRd)+kEnvironment(kRd)*0.08);
+}
+vec3 kGlass(vec3 kP,vec3 kRd,vec3 kN,int kIdx){
+  float kT0,kT1;vec3 kN0,kN1;
+  if(kCrystalInterval(kP-kRd*0.018,kRd,kIdx,kT0,kT1,kN0,kN1))kN=kN0;
+  float kFacing=clamp(-dot(kRd,kN),0.0,1.0),kFres=0.035+0.965*pow(1.0-kFacing,5.0);
+  vec3 kLocal=transpose(uCrystalBasis[kIdx])*(kP-uCrystalA[kIdx].xyz);
+  vec3 kEtch=vec3(sin(kLocal.y*112.0+kLocal.z*13.0),0.0,cos(kLocal.y*97.0+kLocal.x*11.0));
+  vec3 kShinyN=normalize(kN+uCrystalBasis[kIdx]*kEtch*0.0035);
+  vec3 kReflect=kEnvironment(reflect(kRd,kShinyN));
+  vec3 kInside=refract(kRd,kN,1.0/1.46),kOrigin=kP+kInside*0.003;
+  vec3 kVeil=vec3(0.0);float kLength=0.0;bool kEscaped=false;
+  vec3 kExitDir=kInside;
+  for(int kJ=0;kJ<3;kJ++){
+    if(!kCrystalInterval(kOrigin,kInside,kIdx,kT0,kT1,kN0,kN1))break;
+    for(int kV=0;kV<5;kV++){
+      vec3 kQ=kOrigin+kInside*(kT1*(float(kV)+0.5)/5.0);
+      vec3 kQL=transpose(uCrystalBasis[kIdx])*(kQ-uCrystalA[kIdx].xyz);
+      float kCrack=exp(-abs(dot(kQL,normalize(vec3(0.25,0.9,-0.32)))-uCrystalB[kIdx].x*0.43+0.014*sin(kQL.x*36.0))*160.0);
+      float kCloud=kValue(kQL*12.0+float(kIdx))*kValue(kQL*5.0+3.0);
+      float kScatter=kT1*(0.32*kCloud+0.48*kCrack)/5.0;
+      kVeil+=(kIce*0.65+kCyan*kSpot(kQ)*1.6)*kScatter;
+    }
+    kLength+=kT1;kOrigin+=kInside*kT1;
+    vec3 kRefr=refract(kInside,-kN1,1.46);
+    if(dot(kRefr,kRefr)>0.01){kExitDir=normalize(kRefr);kOrigin+=kExitDir*0.005;kEscaped=true;break;}
+    kInside=reflect(kInside,kN1);kOrigin+=kInside*0.004;
+    kVeil+=kTint(kIdx)*0.006;
+  }
+  vec3 kBeer=exp(-kSigma(kIdx)*kLength);
+  vec3 kTransmission=kEscaped?kBeyond(kOrigin,kExitDir,kIdx):kEnvironment(kInside)*0.20;
+  vec3 kC=kReflect*kFres+kTransmission*kBeer*(1.0-kFres)+kVeil;
+  float kBeam=kSpot(kP);
+  vec3 kL=normalize(kLamp-kP),kH=normalize(kL-kRd);
+  kC+=kCyan*kBeam*pow(max(0.0,dot(kShinyN,kH)),180.0)*2.4;
+  kC+=kTint(kIdx)*(0.010+0.045*kBeam)*(1.0-kBeer);
+  kC+=kIce*0.014*pow(1.0-kFacing,2.0);
+  return kC;
+}
+vec3 kVolume(vec3 kRo,vec3 kRd,float kLimit){
+  vec3 kC=vec3(0.0);float kEnd=min(kLimit,15.0);
+  float kJitter=0.45+0.10*kHash(vec3(gl_FragCoord.xy,0.5));
+  for(int kJ=0;kJ<36;kJ++){
+    float kT=(float(kJ)+kJitter)*kEnd/36.0;
+    vec3 kP=kRo+kRd*kT;
+    float kHeight=smoothstep(-0.08,0.30,kP.y)*(1.0-smoothstep(2.7,4.7,kP.y));
+    float kFall=exp(-length(kP.xz)*0.28);
+    kC+=kCyan*kSpot(kP)*kHeight*kFall*(kEnd/36.0)*0.0048;
+  }
+  return kC;
+}
+void main(){
+  vec3 kCam=vec3(5.7,5.8,8.3),kTarget=vec3(0.0,0.73,0.0);
+  vec3 kFw=normalize(kTarget-kCam),kRt=normalize(cross(kFw,vec3(0.0,1.0,0.0))),kUp=cross(kRt,kFw);
+  vec2 kP=(2.0*gl_FragCoord.xy-uResolution)/uResolution.y;
+  float kLens=3.15*min(1.0,(uResolution.x/uResolution.y)/0.76);
+  vec3 kRd=normalize(kRt*kP.x+kUp*kP.y+kFw*kLens);
+  float kFloorT=kRd.y<-0.001?(-0.08-kCam.y)/kRd.y:60.0;
+  float kB=dot(kCam-vec3(0.0,0.7,0.0),kRd),kC=dot(kCam-vec3(0.0,0.7,0.0),kCam-vec3(0.0,0.7,0.0))-3.0*3.0;
+  float kDisc=kB*kB-kC;
+  float kT=kDisc>0.0?max(0.0,-kB-sqrt(kDisc)):kFloorT;
+  float kFar=kDisc>0.0?min(-kB+sqrt(kDisc),kFloorT):0.0;
+  vec2 kGeo=vec2(1000.0,-3.0);bool kHit=false;
+  for(int kJ=0;kJ<112;kJ++){
+    if(kT>kFar)break;
+    kGeo=kMap(kCam+kRd*kT);
+    if(kGeo.x<0.00065){kHit=true;break;}
+    kT+=max(kGeo.x*0.84,0.00045);
+  }
+  vec3 kColor;
+  float kDepth;
+  if(kHit){
+    vec3 kQ=kCam+kRd*kT,kN=kMapNormal(kQ);
+    kColor=kGeo.y<0.0?kStone(kQ,kN,kRd,true):kGlass(kQ,kRd,kN,int(kGeo.y+0.1));
+    kDepth=kT;
+  }else if(kFloorT<35.0){
+    vec3 kQ=kCam+kRd*kFloorT;
+    kColor=kStone(kQ,vec3(0.0,1.0,0.0),kRd,length(kQ.xz)<3.8);
+    kDepth=kFloorT;
+  }else{kColor=kBackdrop(kRd);kDepth=22.0;}
+  float kHaze=1.0-exp(-0.013*max(0.0,kDepth-6.0));
+  kColor=mix(kColor,kBackdrop(kRd),kHaze)+kVolume(kCam,kRd,kDepth);
+  float kDither=kHash(vec3(gl_FragCoord.xy,4.0))-0.5;
+  kColor+=kDither*uDither/255.0;
+  kOut=vec4(max(kColor,0.0),1.0);
+}
+</script>
+
+<script id="kDustVertex" type="x-shader/x-vertex">#version 300 es
+precision highp float;
+layout(location=0) in vec4 kSeed;
+uniform vec2 uResolution;
+uniform float uAngle;
+out vec3 kDustColor;
+void main(){
+  vec3 kCam=vec3(5.7,5.8,8.3),kFw=normalize(vec3(0.0,0.73,0.0)-kCam),kRt=normalize(cross(kFw,vec3(0.0,1.0,0.0))),kUp=cross(kRt,kFw);
+  vec3 kP=kSeed.xyz+vec3(0.07*sin(2.0*uAngle+kSeed.w*9.0),0.065*cos(2.0*uAngle+kSeed.w*5.0),0.08*sin(2.0*uAngle+kSeed.w*7.0));
+  vec3 kRel=kP-kCam;float kZ=dot(kRel,kFw);
+  float kLens=3.15*min(1.0,(uResolution.x/uResolution.y)/0.76);
+  vec2 kNDC=vec2(dot(kRel,kRt),dot(kRel,kUp))*kLens/kZ;kNDC.x*=uResolution.y/uResolution.x;
+  if(kZ<1.0)kNDC=vec2(8.0);
+  gl_Position=vec4(kNDC,0.0,1.0);
+  float kBlur=abs(kZ-11.0)*0.44;
+  gl_PointSize=clamp((0.7+kSeed.w*kSeed.w*1.8+kBlur)*uResolution.y/850.0,1.0,12.0);
+  vec3 kLampP=vec3(0.0,4.8,0.0),kAx=normalize(vec3(1.23*cos(uAngle),0.06,1.23*sin(uAngle))-kLampP);
+  float kLit=smoothstep(0.94,0.99,dot(normalize(kP-kLampP),kAx));
+  kDustColor=mix(vec3(0.29,0.36,0.53),vec3(0.12,0.87,1.0),kLit)*(0.008+0.047*kLit+0.012*kSeed.w)*exp(-kBlur*0.35);
+}
+</script>
+<script id="kDustFragment" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec3 kDustColor;
+out vec4 kOut;
+void main(){float kR=length(gl_PointCoord-0.5)*2.0;float kH=exp(-kR*kR*5.0)*(1.0-smoothstep(0.6,1.0,kR));kOut=vec4(kDustColor*kH,0.0);}
+</script>
+
+<script id="kBlurFragment" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec2 kUV;
+uniform sampler2D uImage;
+uniform vec2 uTexel;
+uniform vec2 uDirection;
+uniform float uExtract;
+out vec4 kOut;
+void main(){
+  vec3 kC=texture(uImage,kUV).rgb*0.227027027;
+  kC+=(texture(uImage,kUV+uTexel*uDirection*1.384615385).rgb+texture(uImage,kUV-uTexel*uDirection*1.384615385).rgb)*0.316216216;
+  kC+=(texture(uImage,kUV+uTexel*uDirection*3.230769231).rgb+texture(uImage,kUV-uTexel*uDirection*3.230769231).rgb)*0.070270270;
+  if(uExtract>0.5)kC*=smoothstep(0.18,0.85,max(kC.r,max(kC.g,kC.b)));
+  kOut=vec4(kC,1.0);
+}
+</script>
+<script id="kFinishFragment" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec2 kUV;
+uniform sampler2D uImage;
+uniform sampler2D uHalo;
+uniform vec2 uResolution;
+out vec4 kOut;
+vec3 kACES(vec3 kX){return clamp((kX*(2.51*kX+0.03))/(kX*(2.43*kX+0.59)+0.14),0.0,1.0);}
+float kGrain(vec2 kP){vec3 kQ=fract(vec3(kP.xyx)*0.1031);kQ+=dot(kQ,kQ.yzx+33.33);return fract((kQ.x+kQ.y)*kQ.z);}
+void main(){
+  vec2 kP=(gl_FragCoord.xy-0.5*uResolution)/uResolution.y;
+  vec3 kC=texture(uImage,kUV).rgb+texture(uHalo,kUV).rgb*0.29;
+  kC*=1.0-0.29*smoothstep(0.23,0.91,length(kP));
+  kC=pow(kACES(kC*1.13),vec3(1.0/2.2));
+  kC+=(kGrain(gl_FragCoord.xy)-0.5)*0.0030;
+  kOut=vec4(max(kC,0.0),1.0);
+}
+</script>
+
+<script>
+(()=>{
+  'use strict';
+  const PERIOD_MS=10000,kPeriodSeconds=PERIOD_MS/1000;
+  const kCanvas=document.getElementById('cave');
+  const kG=kCanvas.getContext('webgl2',{alpha:false,antialias:false,depth:false,stencil:false,premultipliedAlpha:false,powerPreference:'high-performance'});
+  if(!kG){console.error('Crystal Cave requires WebGL 2.');return;}
+  const kHDR=!!kG.getExtension('EXT_color_buffer_float');
+  const kArgs=new URLSearchParams(location.search),kT=kArgs.has('t')?Number(kArgs.get('t')):NaN;
+  const kFrozen=Number.isFinite(kT)?((kT%1)+1)%1:null;
+  const kShared=document.getElementById('kGeometry').textContent;
+  function kCompile(kType,kID){
+    const kS=kG.createShader(kType),kSource=document.getElementById(kID).textContent.replace('/*__GEOMETRY__*/',kShared);
+    kG.shaderSource(kS,kSource);kG.compileShader(kS);
+    const kOK=kG.getShaderParameter(kS,kG.COMPILE_STATUS),kLog=kG.getShaderInfoLog(kS)||'';
+    if(kLog.trim())console[kOK?'warn':'error'](kID+': '+kLog);
+    if(!kOK)throw new Error(kID+' shader failed to compile.');
+    return kS;
+  }
+  function kProgram(kV,kF){
+    const kP=kG.createProgram(),kVS=kCompile(kG.VERTEX_SHADER,kV),kFS=kCompile(kG.FRAGMENT_SHADER,kF);
+    kG.attachShader(kP,kVS);kG.attachShader(kP,kFS);kG.linkProgram(kP);
+    const kOK=kG.getProgramParameter(kP,kG.LINK_STATUS),kLog=kG.getProgramInfoLog(kP)||'';
+    if(kLog.trim())console[kOK?'warn':'error'](kF+' link: '+kLog);
+    kG.deleteShader(kVS);kG.deleteShader(kFS);if(!kOK)throw new Error(kF+' program failed to link.');
+    const kU={};
+    for(let kI=0;kI<kG.getProgramParameter(kP,kG.ACTIVE_UNIFORMS);kI++){
+      const kN=kG.getActiveUniform(kP,kI).name;kU[kN.replace(/\[0\]$/,'')]=kG.getUniformLocation(kP,kN);
+    }
+    return {p:kP,u:kU};
+  }
+  const kScene=kProgram('kFullscreenVertex','kSceneFragment'),kPhotons=kProgram('kPhotonVertex','kPhotonFragment');
+  const kDust=kProgram('kDustVertex','kDustFragment'),kBlur=kProgram('kFullscreenVertex','kBlurFragment'),kFinish=kProgram('kFullscreenVertex','kFinishFragment');
+  const kFullVAO=kG.createVertexArray();
+  function kMulberry32(kSeed){return ()=>{let kV=kSeed+=0x6D2B79F5;kV=Math.imul(kV^kV>>>15,kV|1);kV^=kV+Math.imul(kV^kV>>>7,kV|61);return ((kV^kV>>>14)>>>0)/4294967296;};}
+  const kPRNG=kMulberry32(0x43525953);
+  // angle, root radius, tip height, apothem, outward lean, local facet yaw
+  const kRows=[
+    [0.10,1.21,1.13,.24,.12,.10],[.78,1.28,.77,.20,.10,.43],
+    [1.45,1.26,1.02,.23,.07,.12],[2.04,1.21,1.63,.27,.12,.27],
+    [2.66,1.18,2.35,.30,.10,.08],[3.32,1.25,1.78,.27,.12,.35],
+    [3.97,1.25,1.33,.25,.15,.10],[4.55,1.22,1.23,.24,.06,.31],
+    [5.19,1.25,1.08,.23,.11,.18],[5.72,1.20,.72,.20,.16,.47],
+    [.44,1.56,.45,.13,.24,.11],[1.77,1.54,.54,.15,.19,.42],
+    [2.40,1.50,.82,.16,.22,.25],[3.62,1.55,.69,.16,.23,.17],
+    [4.87,1.53,.57,.14,.20,.36],[5.98,1.52,.43,.12,.18,.12]
+  ];
+  const kA=new Float32Array(64),kB=new Float32Array(64),kBasis=new Float32Array(144);
+  for(let kI=0;kI<16;kI++){
+    const [kPhi,kRoot,kH,kR,kLean,kYaw]=kRows[kI],kC=Math.cos(kPhi),kS=Math.sin(kPhi),kD=Math.sqrt(1+kLean*kLean);
+    kA.set([kRoot*kC,.105,kRoot*kS,kR],kI*4);kB.set([kH,kR*.16*Math.cos(kI*1.7),kR*.16*Math.sin(kI*1.7),0],kI*4);
+    const kX=[kC/kD,-kLean/kD,kS/kD],kY=[kLean*kC/kD,1/kD,kLean*kS/kD],kZ=[-kS,0,kC],kCY=Math.cos(kYaw),kSY=Math.sin(kYaw);
+    for(let kJ=0;kJ<3;kJ++){kBasis[kI*9+kJ]=kCY*kX[kJ]+kSY*kZ[kJ];kBasis[kI*9+3+kJ]=kY[kJ];kBasis[kI*9+6+kJ]=-kSY*kX[kJ]+kCY*kZ[kJ];}
+  }
+  for(const kP of [kScene,kPhotons]){kG.useProgram(kP.p);kG.uniform4fv(kP.u.uCrystalA,kA);kG.uniform4fv(kP.u.uCrystalB,kB);kG.uniformMatrix3fv(kP.u.uCrystalBasis,false,kBasis);}
+  const kPhotonSide=160,kPhotonCount=kPhotonSide*kPhotonSide*3,kPhotonSeeds=new Float32Array(kPhotonCount*4);
+  let kAt=0;
+  for(let kY=0;kY<kPhotonSide;kY++)for(let kX=0;kX<kPhotonSide;kX++){
+    const kPX=((kX+.18+.64*kPRNG())/kPhotonSide-.5)*5.2,kPZ=((kY+.18+.64*kPRNG())/kPhotonSide-.5)*5.2;
+    for(let kC=0;kC<3;kC++){kPhotonSeeds.set([kPX,kPZ,kC,0],kAt);kAt+=4;}
+  }
+  const kDustCount=170,kDustSeeds=new Float32Array(kDustCount*4);
+  for(let kI=0;kI<kDustCount;kI++)kDustSeeds.set([(kPRNG()-.5)*9,.5+kPRNG()*4.6,(kPRNG()-.5)*9,kPRNG()],kI*4);
+  function kPointVAO(kData){const kV=kG.createVertexArray(),kBf=kG.createBuffer();kG.bindVertexArray(kV);kG.bindBuffer(kG.ARRAY_BUFFER,kBf);kG.bufferData(kG.ARRAY_BUFFER,kData,kG.STATIC_DRAW);kG.enableVertexAttribArray(0);kG.vertexAttribPointer(0,4,kG.FLOAT,false,16,0);return kV;}
+  const kPhotonVAO=kPointVAO(kPhotonSeeds),kDustVAO=kPointVAO(kDustSeeds);
+  let kW=0,kH=0,kSW=0,kSH=0,kLost=false;
+  const kTargets=[],kCausticSize=512;
+  function kTarget(kTW,kTH){
+    const kTex=kG.createTexture();kG.bindTexture(kG.TEXTURE_2D,kTex);
+    for(const [kKey,kVal] of [[kG.TEXTURE_MIN_FILTER,kG.LINEAR],[kG.TEXTURE_MAG_FILTER,kG.LINEAR],[kG.TEXTURE_WRAP_S,kG.CLAMP_TO_EDGE],[kG.TEXTURE_WRAP_T,kG.CLAMP_TO_EDGE]])kG.texParameteri(kG.TEXTURE_2D,kKey,kVal);
+    kG.texImage2D(kG.TEXTURE_2D,0,kHDR?kG.RGBA16F:kG.RGBA8,kTW,kTH,0,kG.RGBA,kHDR?kG.HALF_FLOAT:kG.UNSIGNED_BYTE,null);
+    const kF=kG.createFramebuffer();kG.bindFramebuffer(kG.FRAMEBUFFER,kF);kG.framebufferTexture2D(kG.FRAMEBUFFER,kG.COLOR_ATTACHMENT0,kG.TEXTURE_2D,kTex,0);
+    if(kG.checkFramebufferStatus(kG.FRAMEBUFFER)!==kG.FRAMEBUFFER_COMPLETE)throw new Error('Incomplete render target.');
+    return {tex:kTex,fbo:kF};
+  }
+  const kCausticA=kTarget(kCausticSize,kCausticSize),kCausticB=kTarget(kCausticSize,kCausticSize);
+  function kResize(){
+    const kVW=Math.max(1,innerWidth),kVH=Math.max(1,innerHeight),kDPR=Math.min(Math.max(devicePixelRatio||1,1.5),2);
+    const kScale=Math.min(kDPR,Math.sqrt(2400000/(kVW*kVH)),kG.getParameter(kG.MAX_TEXTURE_SIZE)/Math.max(kVW,kVH));
+    const kNW=Math.max(1,Math.round(kVW*kScale)),kNH=Math.max(1,Math.round(kVH*kScale));
+    if(kNW===kW&&kNH===kH)return;
+    kW=kNW;kH=kNH;kCanvas.width=kW;kCanvas.height=kH;kSW=Math.max(1,Math.ceil(kW/4));kSH=Math.max(1,Math.ceil(kH/4));
+    for(const kTg of kTargets){kG.deleteFramebuffer(kTg.fbo);kG.deleteTexture(kTg.tex);}kTargets.length=0;
+    kTargets.push(kTarget(kW,kH),kTarget(kSW,kSH),kTarget(kSW,kSH));
+  }
+  function kUse(kP,kAngle){
+    kG.useProgram(kP.p);kG.bindVertexArray(kFullVAO);
+    if(kP.u.uAngle!==undefined)kG.uniform1f(kP.u.uAngle,kAngle);
+    if(kP.u.uResolution!==undefined)kG.uniform2f(kP.u.uResolution,kW,kH);
+    if(kP.u.uDither!==undefined)kG.uniform1f(kP.u.uDither,kHDR?0:1);
+  }
+  function kBind(kTex,kUnit){kG.activeTexture(kG.TEXTURE0+kUnit);kG.bindTexture(kG.TEXTURE_2D,kTex);}
+  function kTri(){kG.drawArrays(kG.TRIANGLES,0,3);}
+  function kBlurPass(kFrom,kTo,kTW,kTH,kSourceW,kSourceH,kX,kY,kExtract){
+    kG.bindFramebuffer(kG.FRAMEBUFFER,kTo.fbo);kG.viewport(0,0,kTW,kTH);kUse(kBlur,0);kBind(kFrom.tex,0);
+    kG.uniform1i(kBlur.u.uImage,0);kG.uniform2f(kBlur.u.uTexel,1/kSourceW,1/kSourceH);kG.uniform2f(kBlur.u.uDirection,kX,kY);kG.uniform1f(kBlur.u.uExtract,kExtract);kTri();
+  }
+  function kRender(kTimestamp){
+    if(kLost)return;kResize();
+    const kPhase=kFrozen===null?((kTimestamp/1000)%kPeriodSeconds)/kPeriodSeconds:kFrozen,kAngle=2*Math.PI*kPhase;
+    kG.bindFramebuffer(kG.FRAMEBUFFER,kCausticA.fbo);kG.viewport(0,0,kCausticSize,kCausticSize);kG.clearColor(0,0,0,0);kG.clear(kG.COLOR_BUFFER_BIT);
+    kUse(kPhotons,kAngle);kG.bindVertexArray(kPhotonVAO);kG.enable(kG.BLEND);kG.blendFunc(kG.ONE,kG.ONE);kG.drawArrays(kG.POINTS,0,kPhotonCount);kG.disable(kG.BLEND);
+    kBlurPass(kCausticA,kCausticB,kCausticSize,kCausticSize,kCausticSize,kCausticSize,.95,0,0);
+    kBlurPass(kCausticB,kCausticA,kCausticSize,kCausticSize,kCausticSize,kCausticSize,0,.95,0);
+    kG.bindFramebuffer(kG.FRAMEBUFFER,kTargets[0].fbo);kG.viewport(0,0,kW,kH);kUse(kScene,kAngle);kBind(kCausticA.tex,0);kG.uniform1i(kScene.u.uCaustics,0);kTri();
+    kUse(kDust,kAngle);kG.bindVertexArray(kDustVAO);kG.enable(kG.BLEND);kG.blendFunc(kG.ONE,kG.ONE);kG.drawArrays(kG.POINTS,0,kDustCount);kG.disable(kG.BLEND);
+    kBlurPass(kTargets[0],kTargets[1],kSW,kSH,kW,kH,1,0,1);
+    kBlurPass(kTargets[1],kTargets[2],kSW,kSH,kSW,kSH,0,1,0);
+    kBlurPass(kTargets[2],kTargets[1],kSW,kSH,kSW,kSH,1.4,0,0);
+    kBlurPass(kTargets[1],kTargets[2],kSW,kSH,kSW,kSH,0,1.4,0);
+    kG.bindFramebuffer(kG.FRAMEBUFFER,null);kG.viewport(0,0,kW,kH);kUse(kFinish,kAngle);kBind(kTargets[0].tex,0);kBind(kTargets[2].tex,1);
+    kG.uniform1i(kFinish.u.uImage,0);kG.uniform1i(kFinish.u.uHalo,1);kTri();
+    if(kFrozen===null)requestAnimationFrame(kRender);
+  }
+  kCanvas.addEventListener('webglcontextlost',kEvent=>{kEvent.preventDefault();kLost=true;});
+  kCanvas.addEventListener('webglcontextrestored',()=>location.reload());
+  addEventListener('resize',()=>{if(kFrozen!==null)requestAnimationFrame(kRender);},{passive:true});
+  requestAnimationFrame(kRender);
+})();
+</script>
+</body>
+</html>

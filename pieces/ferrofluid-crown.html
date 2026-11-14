@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="REGNUM — a ten-second study of magnetism, black liquid and light. A self-contained, deterministic WebGL artwork.">
+<title>REGNUM — Ferrofluid Crown</title>
+<style>
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#030305}body{position:fixed;inset:0}canvas{display:block;width:100vw;height:100vh;touch-action:none}
+</style>
+<link rel="icon" href="data:,"></head>
+<body>
+<canvas aria-label="A glossy black ferrofluid crown rises from its pool under champagne studio lights and violet magnetic field lines."></canvas>
+<script>
+/*
+ REGNUM / FERROFLUID CROWN
+ One file. No fetched assets, libraries, clock textures, or simulation history.
+ Ten seconds. ?t=0.37 freezes the artwork at 37% of its cycle.
+
+ All temporal inputs come from a single normalized rAF phase. Geometry,
+ illumination, magnetic ribbons and dust use integer harmonics of that phase.
+ The same phase always produces the same pixels at a given viewport and DPR.
+ Render graph: raymarched HDR sculpture + depth-tested magnetic ribbons/dust
+               -> half-resolution bright pass -> separable bloom -> filmic finish.
+*/
+(() => {
+'use strict';
+const canvas = document.querySelector('canvas');
+const gl = canvas.getContext('webgl2', {
+  alpha:false, antialias:false, depth:true, stencil:false,
+  powerPreference:'high-performance', preserveDrawingBuffer:false
+});
+if (!gl) { console.error('REGNUM requires WebGL 2.'); return; }
+const TAU = Math.PI * 2;
+const LOOP = 10;
+const params = new URLSearchParams(location.search);
+const freezeValue = params.has('t') ? Number(params.get('t')) : NaN;
+const frozen = Number.isFinite(freezeValue);
+const frozenPhase = frozen ? freezeValue-Math.floor(freezeValue) : 0;
+let floatTargets = false;
+let storageScale = 1;
+
+const vertexScreen = `#version 300 es
+precision highp float;
+out vec2 kUv;
+void main(){
+  vec2 kPos=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));
+  kUv=kPos;
+  gl_Position=vec4(kPos*2.-1.,0.,1.);
+}`;
+
+const fragmentScene = `#version 300 es
+precision highp float;
+precision highp int;
+in vec2 kUv;
+out vec4 kFragColor;
+uniform vec2 uResolution;
+uniform float uPhase;
+uniform float uStorage;
+uniform vec3 uEye;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec3 uForward;
+uniform float uFocal;
+const float kPi=3.14159265358979323846;
+const float kTau=6.28318530717958647692;
+float kAngle=0.;
+float kGrow=0.;
+
+float kSat(float kX){return clamp(kX,0.,1.);}
+float kSmin(float kX,float kY,float kK){
+  float kH=kSat(.5+.5*(kY-kX)/kK);
+  return mix(kY,kX,kH)-kK*kH*(1.-kH);
+}
+float kCylinder(vec3 kP,float kR,float kH){
+  vec2 kD=abs(vec2(length(kP.xz),kP.y))-vec2(kR,kH);
+  return min(max(kD.x,kD.y),0.)+length(max(kD,0.));
+}
+float kEllipsoid(vec3 kP,vec3 kR){
+  float kK0=length(kP/kR);
+  float kK1=length(kP/(kR*kR));
+  return kK0*(kK0-1.)/max(kK1,.00001);
+}
+float kRoundCone(vec3 kP,float kR1,float kR2,float kH){
+  vec2 kQ=vec2(length(kP.xz),kP.y);
+  float kB=(kR1-kR2)/kH;
+  float kC=sqrt(max(.0001,1.-kB*kB));
+  float kK=dot(kQ,vec2(-kB,kC));
+  if(kK<0.)return length(kQ)-kR1;
+  if(kK>kC*kH)return length(kQ-vec2(0.,kH))-kR2;
+  return dot(kQ,vec2(kC,kB))-kR1;
+}
+float kRingSpikes(vec3 kP,float kCount,float kRadius,float kHeight,float kWidth,float kShift){
+  float kPeriod=kTau/kCount;
+  float kAz=atan(kP.z,kP.x)-kShift;
+  float kFirst=floor(kAz/kPeriod);
+  float kBest=20.;
+  // Check both adjacent needles. Nearest-sector folding alone cuts the
+  // meniscus when unequal needles overlap at a sector boundary.
+  for(int kJ=0;kJ<2;kJ++){
+    float kCenter=(kFirst+float(kJ))*kPeriod+kShift;
+    vec2 kAxis=vec2(cos(kCenter),sin(kCenter));
+    vec2 kSide=vec2(-kAxis.y,kAxis.x);
+    float kR=kRadius+.014*kGrow*sin(2.*kAngle+3.*kCenter+1.);
+    float kH=.025+kGrow*kHeight*(1.+.13*sin(kCenter*3.+.8)+.065*cos(kCenter*2.-.4));
+    vec3 kQ=vec3(dot(kP.xz,kAxis)-kR,kP.y-.075-.135*kGrow,dot(kP.xz,kSide));
+    float kT=kSat(kQ.y/max(kH,.025));
+    kQ.x-=.105*kGrow*kT*kT;
+    kQ.z-=.025*kGrow*kT*kT*sin(kAngle+kCenter*2.);
+    if(kQ.y>0.&&kQ.y<kH)kQ.y=kH*(1.-pow(1.-kT,1.28));
+    float kW=.006+kWidth*kGrow;
+    float kFlute=.0014*kGrow*sin(7.*atan(kQ.z,kQ.x)+kQ.y*5.+2.*kAngle)*sin(kPi*kT);
+    kBest=min(kBest,kRoundCone(kQ,kW,.0028,kH)+kFlute);
+  }
+  return kBest;
+}
+float kLiquid(vec3 kP){
+  float kR=length(kP.xz);
+  float kRip=.0045*sin(24.*kR-2.*kAngle)*exp(-1.3*kR);
+  kRip+=.0018*sin(38.*kR+3.*kAngle)*exp(-abs(kR-1.16)*4.);
+  vec3 kQ=kP-vec3(0.,.058+kRip*(1.-.45*kGrow),0.);
+  float kD=kEllipsoid(kQ,vec3(1.548,.091,1.548));
+  vec2 kTorus=vec2(kR-.855,kP.y-(.112+.12*kGrow));
+  float kAnnulus=length(kTorus)-(.012+.132*kGrow);
+  kD=kSmin(kD,kAnnulus,.003+.127*kGrow);
+  float kOuter=kRingSpikes(kP,9.,.855,1.64,.228,.055*sin(kAngle));
+  kD=kSmin(kD,kOuter,.015+.135*kGrow);
+  float kInner=kRingSpikes(kP,5.,.365,.87,.183,.31-.035*sin(kAngle));
+  kD=kSmin(kD,kInner,.014+.126*kGrow);
+  vec3 kHeart=kP-vec3(.024*kGrow*sin(kAngle),.074+.030*kGrow,.018*kGrow*cos(kAngle));
+  float kCore=kRoundCone(kHeart,.006+.192*kGrow,.003,.026+1.20*kGrow);
+  return kSmin(kD,kCore,.014+.156*kGrow);
+}
+vec2 kScene(vec3 kP){
+  float kD=kLiquid(kP);
+  float kId=1.;
+  float kDish=kCylinder(kP-vec3(0.,-.064,0.),1.628,.024)-.021;
+  if(kDish<kD){kD=kDish;kId=2.;}
+  float kRim=length(vec2(length(kP.xz)-1.602,kP.y+.009))-.009;
+  if(kRim<kD){kD=kRim;kId=3.;}
+  return vec2(kD,kId);
+}
+float kBound(vec3 kP){
+  vec3 kQ=kP-vec3(0.,1.03,0.);
+  return length(max(abs(kQ)-vec3(1.73,1.19,1.73),0.));
+}
+vec2 kMarch(vec3 kRo,vec3 kRd,float kStart,float kEnd,int kLimit){
+  float kT=kStart;
+  float kId=0.;
+  for(int kI=0;kI<160;kI++){
+    if(kI>=kLimit||kT>kEnd)break;
+    vec3 kP=kRo+kRd*kT;
+    float kBox=kBound(kP);
+    if(kBox>.08){kT+=max(.025,kBox*.85);continue;}
+    vec2 kHit=kScene(kP);
+    if(abs(kHit.x)<.00038*max(1.,kT*.3)){kId=kHit.y;break;}
+    kT+=max(.00026,kHit.x*.62);
+  }
+  return vec2(kT,kId);
+}
+vec3 kNormal(vec3 kP,float kT){
+  float kE=.00032*max(1.,kT*.2);
+  vec2 kV=vec2(1.,-1.)*.577350269;
+  return normalize(kV.xyy*kScene(kP+kV.xyy*kE).x+
+                   kV.yyx*kScene(kP+kV.yyx*kE).x+
+                   kV.yxy*kScene(kP+kV.yxy*kE).x+
+                   kV.xxx*kScene(kP+kV.xxx*kE).x);
+}
+float kOcclusion(vec3 kP,vec3 kN){
+  float kSum=0.;float kWeight=1.;
+  for(int kI=1;kI<=5;kI++){
+    float kH=.026+float(kI)*.044;
+    kSum+=(kH-kScene(kP+kN*kH).x)*kWeight;
+    kWeight*=.61;
+  }
+  return kSat(1.-2.75*kSum);
+}
+float kShadow(vec3 kP,vec3 kL,float kEnd){
+  float kVis=1.;float kT=.018;
+  for(int kI=0;kI<22;kI++){
+    if(kT>kEnd)break;
+    float kD=kScene(kP+kL*kT).x;
+    if(kD<.0004)return .025;
+    kVis=min(kVis,10.*kD/kT);
+    kT+=clamp(kD,.017,.19);
+  }
+  return clamp(kVis,.025,1.);
+}
+float kCard(vec3 kD,vec3 kAim,vec3 kAxis,float kW,float kH,float kEdge){
+  vec3 kN=normalize(kAim);
+  vec3 kU=normalize(cross(kAxis,kN));
+  vec3 kV=cross(kN,kU);
+  float kDen=dot(kD,kN);
+  vec2 kP=vec2(dot(kD,kU),dot(kD,kV))/max(kDen,.0001);
+  vec2 kB=abs(kP)-vec2(kW,kH);
+  float kSd=length(max(kB,0.))+min(max(kB.x,kB.y),0.);
+  return (1.-smoothstep(-kEdge,kEdge,kSd))*smoothstep(.02,.3,kDen);
+}
+vec3 kEnvironment(vec3 kD){
+  float kAz=atan(kD.z,kD.x);
+  vec3 kC=mix(vec3(.006,.0075,.011),vec3(.020,.022,.031),kSat(kD.y*.7+.3));
+  kC+=vec3(.045,.041,.036)*exp(-abs(kD.y-.055)*50.);
+  float kSlide=.105*sin(kAngle);
+  // A paired champagne softbox, with graduated edges and a dark mullion.
+  vec3 kMain=vec3(-.75+kSlide,1.5,1.05);
+  float kLarge=kCard(kD,kMain,vec3(0.,1.,0.),.43,.66,.13);
+  float kSeam=kCard(kD,kMain,vec3(0.,1.,0.),.012,.64,.009);
+  kC+=vec3(1.,.84,.64)*(kLarge-.76*kSeam)*5.4;
+  // The right-hand ribbon makes needle tips and menisci read as wet metal.
+  kC+=vec3(.78,.84,.99)*kCard(kD,vec3(1.45,.50,.50+kSlide),vec3(0.,1.,0.),.078,.75,.045)*8.0;
+  kC+=vec3(1.,.96,.86)*kCard(kD,vec3(.15,2.7,-.5),vec3(0.,0.,1.),.54,.33,.12)*4.4;
+  kC+=vec3(.35,.105,1.)*kCard(kD,vec3(-1.3,.54,-1.),vec3(0.,1.,0.),.085,.63,.07)*2.9;
+  kC+=vec3(1.,.64,.29)*kCard(kD,vec3(.65,.32,-1.2),vec3(0.,1.,0.),.025,.50,.035)*2.0;
+  kC+=vec3(.20,.13,.38)*exp(-abs(kD.y+.018)*34.)*.30;
+  kC+=vec3(.07,.076,.09)*pow(max(0.,cos(kAz*3.-.3)),12.)*exp(-abs(kD.y-.16)*8.);
+  return kC;
+}
+vec3 kMetal(vec3 kP,vec3 kN,vec3 kRd,float kId,float kT,bool kSecondary){
+  float kAo=kSecondary?.84:kOcclusion(kP,kN);
+  if(kId<1.5){
+    vec3 kFine=vec3(sin(kP.z*105.+sin(kP.y*37.)),sin(kP.x*83.+kP.z*46.),cos(kP.x*91.+kP.y*53.));
+    kN=normalize(kN+.0035*kFine);
+  }else if(kId<2.5){
+    float kR=length(kP.xz);
+    kN=normalize(kN+vec3(kP.x,0.,kP.z)/max(kR,.01)*.012*sin(kR*1250.));
+  }
+  float kNdv=kSat(dot(kN,-kRd));
+  vec3 kRef=reflect(kRd,kN);
+  vec3 kF0=kId<1.5?vec3(.145,.151,.165):(kId<2.5?vec3(.37,.40,.46):vec3(.73,.54,.29));
+  vec3 kFr=kF0+(1.-kF0)*pow(1.-kNdv,5.);
+  float kRough=kId<1.5?.013:(kId<2.5?.047:.023);
+  vec3 kTangent=normalize(cross(kRef,abs(kRef.y)<.92?vec3(0.,1.,0.):vec3(1.,0.,0.)));
+  vec3 kBitangent=cross(kRef,kTangent);
+  vec3 kEnv=kEnvironment(kRef)*.48;
+  kEnv+=(kEnvironment(normalize(kRef+kTangent*kRough))+kEnvironment(normalize(kRef-kTangent*kRough))+
+         kEnvironment(normalize(kRef+kBitangent*kRough))+kEnvironment(normalize(kRef-kBitangent*kRough)))*.13;
+  float kReflectVis=1.;
+  if(!kSecondary&&kId<1.5){
+    float kBlock=kShadow(kP+kN*.006,kRef,1.0);
+    kReflectVis=mix(1.,.30+.70*kBlock,smoothstep(.02,.20,kN.y));
+  }
+  vec3 kL=normalize(vec3(-2.,4.5,3.));
+  float kSha=kSecondary?1.:kShadow(kP+kN*.005,kL,2.7);
+  float kNdl=max(0.,dot(kN,kL));
+  vec3 kC=kEnv*kFr*mix(.56,1.,kAo)*kReflectVis;
+  vec3 kBody=kId<1.5?vec3(.003,.004,.007):vec3(.013,.016,.022);
+  kC+=kBody*(.25+.75*kNdl*kSha)*kAo;
+  float kEdge=pow(1.-kNdv,3.);
+  kC+=vec3(.027,.012,.070)*kEdge*kAo*(.65+.35*cos(kAngle));
+  return kC;
+}
+vec3 kBackdrop(vec3 kRd){
+  vec3 kC=vec3(.0022,.0024,.0042);
+  float kHaze=exp(-pow((kRd.x+.12)*3.2,2.)-pow((kRd.y-.05)*4.8,2.));
+  kC+=vec3(.008,.004,.019)*kHaze;
+  float kBeam=exp(-pow((kRd.x+.38*kRd.y+.24)*19.,2.));
+  kC+=vec3(.0032,.0024,.0054)*kBeam*kHaze;
+  return kC;
+}
+void main(){
+  kAngle=kTau*fract(uPhase);
+  kGrow=smoothstep(.015,.985,.5-.5*cos(kAngle));
+  vec2 kP=(gl_FragCoord.xy*2.-uResolution)/uResolution.y;
+  vec3 kRd=normalize(uRight*kP.x+uUp*kP.y+uForward*uFocal);
+  float kFloorT=kRd.y<-.00001?(-.126-uEye.y)/kRd.y:24.;
+  vec2 kHit=kMarch(uEye,kRd,.05,min(14.,kFloorT),150);
+  vec3 kC=kBackdrop(kRd);
+  float kDepth=24.;
+  if(kHit.y>.5&&kHit.x<kFloorT){
+    vec3 kPos=uEye+kRd*kHit.x;
+    vec3 kN=kNormal(kPos,kHit.x);
+    kC=kMetal(kPos,kN,kRd,kHit.y,kHit.x,false);
+    kC=mix(kC,kBackdrop(kRd),1.-exp(-kHit.x*.005));
+    kDepth=kHit.x;
+  }else if(kFloorT<18.){
+    vec3 kPos=uEye+kRd*kFloorT;
+    float kR=length(kPos.xz);
+    float kTex=sin(kPos.x*179.)*sin(kPos.z*153.);
+    vec3 kN=normalize(vec3(.0005*kTex,1.,.0005*sin(kPos.x*121.+kPos.z*99.)));
+    float kContact=1.-.88*exp(-kR*kR/.97);
+    float kPoolShadow=1.-.22*exp(-dot((kPos.xz-vec2(.3,-.32))/vec2(2.0,1.6),(kPos.xz-vec2(.3,-.32))/vec2(2.0,1.6)));
+    kC=vec3(.0060,.0063,.0085)*kContact*kPoolShadow;
+    kC+=vec3(.009,.004,.022)*exp(-length(kPos.xz-vec2(-1.4,-.3))*.8);
+    if(kR<3.3){
+      vec3 kMirror=reflect(kRd,kN);
+      vec2 kMirrorHit=kMarch(kPos+kN*.004,kMirror,.012,6.,82);
+      if(kMirrorHit.y>.5){
+        vec3 kMP=kPos+kN*.004+kMirror*kMirrorHit.x;
+        vec3 kMN=kNormal(kMP,kMirrorHit.x);
+        vec3 kMC=kMetal(kMP,kMN,kMirror,kMirrorHit.y,kMirrorHit.x,true);
+        float kReflection=.115*exp(-kMirrorHit.x*.55);
+        kC+=kMC*kReflection;
+      }
+    }
+    kC=mix(kBackdrop(kRd),kC,(1.-smoothstep(7.,18.,kFloorT)));
+    kDepth=kFloorT;
+  }
+  kFragColor=vec4(max(kC,0.)*uStorage,1.);
+  gl_FragDepth=min(.9999,kDepth/24.);
+}`;
+
+const vertexField = `#version 300 es
+precision highp float;
+layout(location=0)in vec2 kParam;
+uniform vec2 uResolution;
+uniform float uPhase;
+uniform float uFocal;
+uniform vec3 uEye;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec3 uForward;
+uniform float uWidth;
+out float kSideV;
+out float kAlongV;
+out float kLaneV;
+out vec3 kWorldV;
+const float kTau=6.283185307179586;
+vec3 kCurve(float kT,float kLane){
+  float kA=kTau*fract(uPhase);
+  float kG=smoothstep(.015,.985,.5-.5*cos(kA));
+  float kAz=kLane*kTau/7.+.25+.05*sin(kA);
+  vec2 kRad=vec2(cos(kAz),sin(kAz));
+  vec2 kSide=vec2(-kRad.y,kRad.x);
+  float kH=.48+3.12*kG;
+  kH*=.91+.07*sin(kLane*2.4);
+  vec3 kB0=vec3(kRad*.20,0.).xzy; kB0.y=.145;
+  vec3 kB1=vec3(kRad*.08,0.).xzy; kB1.y=kH;
+  vec3 kB2=vec3(kRad*1.99,0.).xzy; kB2.y=kH*.91;
+  vec3 kB3=vec3(kRad*1.43,0.).xzy; kB3.y=.08;
+  float kS=1.-kT;
+  vec3 kP=kB0*kS*kS*kS+3.*kB1*kS*kS*kT+3.*kB2*kS*kT*kT+kB3*kT*kT*kT;
+  kP.xz+=kSide*.033*sin(3.14159265*kT)*sin(2.*kA+kLane*1.9+kT*6.2831853);
+  return kP;
+}
+vec4 kProject(vec3 kP){
+  vec3 kQ=kP-uEye;
+  float kZ=dot(kQ,uForward);
+  return vec4(dot(kQ,uRight)*uFocal/(uResolution.x/uResolution.y),dot(kQ,uUp)*uFocal,0.,kZ);
+}
+void main(){
+  float kLane=float(gl_InstanceID);
+  vec3 kP=kCurve(kParam.x,kLane);
+  vec4 kClip=kProject(kP);
+  vec4 kNext=kProject(kCurve(clamp(kParam.x+.001,0.,1.),kLane));
+  vec4 kPrev=kProject(kCurve(clamp(kParam.x-.001,0.,1.),kLane));
+  vec2 kTan=(kNext.xy/kNext.w-kPrev.xy/kPrev.w)*uResolution;
+  vec2 kPerp=normalize(vec2(-kTan.y,kTan.x));
+  kClip.xy+=kPerp*kParam.y*uWidth*2./uResolution*kClip.w;
+  kSideV=kParam.y;kAlongV=kParam.x;kLaneV=kLane;kWorldV=kP;
+  gl_Position=kClip;
+}`;
+const fragmentField = `#version 300 es
+precision highp float;
+in float kSideV;
+in float kAlongV;
+in float kLaneV;
+in vec3 kWorldV;
+uniform vec3 uEye;
+uniform float uPhase;
+uniform float uStorage;
+uniform float uCore;
+out vec4 kFragColor;
+void main(){
+  float kA=6.283185307179586*fract(uPhase);
+  float kG=smoothstep(.015,.985,.5-.5*cos(kA));
+  float kSoft=exp(-kSideV*kSideV*5.5);
+  float kEnd=smoothstep(.04,.22,kAlongV)*(1.-smoothstep(.72,.98,kAlongV));
+  float kWave=.43+.57*pow(.5+.5*cos(kAlongV*31.4159265359-2.*kA+kLaneV*2.1),10.);
+  vec3 kTint=mix(vec3(.19,.065,.64),vec3(.47,.27,1.),uCore);
+  float kStrength=mix(.055,.44,uCore)*(.27+.73*kG);
+  kFragColor=vec4(kTint*kSoft*kEnd*kWave*kStrength*uStorage,0.);
+  gl_FragDepth=length(kWorldV-uEye)/24.;
+}`;
+
+const vertexDust = `#version 300 es
+precision highp float;
+layout(location=0)in vec4 kSeed;
+uniform vec2 uResolution;
+uniform vec3 uEye;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec3 uForward;
+uniform float uPhase;
+uniform float uFocal;
+uniform float uDpr;
+out float kFadeV;
+out float kDistV;
+void main(){
+  float kA=6.283185307179586*fract(uPhase);
+  vec3 kP=vec3((kSeed.x-.5)*6.8,.28+kSeed.y*3.8,(kSeed.z-.5)*5.-1.3);
+  kP+=vec3(.055*cos(kA+kSeed.w*30.),.07*sin(kA+kSeed.w*18.),.045*sin(2.*kA+kSeed.w*22.));
+  vec3 kQ=kP-uEye;
+  float kZ=dot(kQ,uForward);
+  gl_Position=vec4(dot(kQ,uRight)*uFocal/(uResolution.x/uResolution.y),dot(kQ,uUp)*uFocal,0.,kZ);
+  gl_PointSize=(1.1+2.7*kSeed.w)*uDpr;
+  kFadeV=(.055+.065*kSeed.w)*(.65+.35*sin(2.*kA+kSeed.x*20.));
+  kDistV=length(kQ);
+}`;
+const fragmentDust = `#version 300 es
+precision highp float;
+in float kFadeV;
+in float kDistV;
+uniform float uStorage;
+out vec4 kFragColor;
+void main(){
+  vec2 kP=gl_PointCoord*2.-1.;
+  float kD=dot(kP,kP);
+  if(kD>1.)discard;
+  kFragColor=vec4(vec3(.80,.64,.45)*exp(-kD*4.)*kFadeV*uStorage,0.);
+  gl_FragDepth=kDistV/24.;
+}`;
+
+const fragmentBloom = `#version 300 es
+precision highp float;
+in vec2 kUv;
+out vec4 kFragColor;
+uniform sampler2D uImage;
+uniform vec2 uStep;
+uniform float uStorage;
+uniform int uBright;
+vec3 kRead(vec2 kP){
+  vec3 kC=texture(uImage,kP).rgb/uStorage;
+  if(uBright==1){float kL=max(kC.r,max(kC.g,kC.b));kC*=smoothstep(.65,1.65,kL);}
+  return kC;
+}
+void main(){
+  vec3 kC=kRead(kUv)*.19648255;
+  kC+=(kRead(kUv+uStep*1.4117647)+kRead(kUv-uStep*1.4117647))*.29690696;
+  kC+=(kRead(kUv+uStep*3.2941176)+kRead(kUv-uStep*3.2941176))*.09447040;
+  kC+=(kRead(kUv+uStep*5.1764706)+kRead(kUv-uStep*5.1764706))*.01038136;
+  kFragColor=vec4(kC*uStorage,1.);
+}`;
+const fragmentFinish = `#version 300 es
+precision highp float;
+in vec2 kUv;
+out vec4 kFragColor;
+uniform sampler2D uImage;
+uniform sampler2D uBloom;
+uniform vec2 uResolution;
+uniform float uStorage;
+vec3 kAces(vec3 kX){return clamp((kX*(2.51*kX+.03))/(kX*(2.43*kX+.59)+.14),0.,1.);}
+float kGrain(vec2 kP){
+  vec3 kQ=fract(vec3(kP.xyx)*vec3(.1031,.1030,.0973));
+  kQ+=dot(kQ,kQ.yxz+33.33);
+  return fract((kQ.x+kQ.y)*kQ.z);
+}
+void main(){
+  vec2 kD=kUv-.5;
+  vec2 kShift=kD*dot(kD,kD)*.00075;
+  vec3 kC;
+  kC.r=texture(uImage,kUv+kShift).r;
+  kC.g=texture(uImage,kUv).g;
+  kC.b=texture(uImage,kUv-kShift).b;
+  kC/=uStorage;
+  vec3 kBloom=texture(uBloom,kUv).rgb/uStorage;
+  kC+=kBloom*.19;
+  kC*=1.-.24*dot(kD,kD);
+  kC=kAces(kC*1.10);
+  kC=pow(kC,vec3(1./2.2));
+  // Static, sub-code-value grain: no nonperiodic random time source.
+  float kDust=kGrain(gl_FragCoord.xy)-.5;
+  kC+=kDust*(.0017+.0012*smoothstep(.02,.5,dot(kC,vec3(.2126,.7152,.0722))));
+  kFragColor=vec4(kC,1.);
+}`;
+
+function compile(type, source, label){
+  const shader=gl.createShader(type);
+  gl.shaderSource(shader,source);gl.compileShader(shader);
+  const log=gl.getShaderInfoLog(shader);
+  if(log&&log.trim())console[gl.getShaderParameter(shader,gl.COMPILE_STATUS)?'warn':'error'](label+' shader: '+log);
+  if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){
+    gl.deleteShader(shader);throw new Error(label+' shader failed to compile.');
+  }
+  return shader;
+}
+function program(vs,fs,label){
+  const vert=compile(gl.VERTEX_SHADER,vs,label+' vertex');
+  const frag=compile(gl.FRAGMENT_SHADER,fs,label+' fragment');
+  const prog=gl.createProgram();gl.attachShader(prog,vert);gl.attachShader(prog,frag);gl.linkProgram(prog);
+  const log=gl.getProgramInfoLog(prog);
+  if(log&&log.trim())console[gl.getProgramParameter(prog,gl.LINK_STATUS)?'warn':'error'](label+' program: '+log);
+  gl.deleteShader(vert);gl.deleteShader(frag);
+  if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){
+    gl.deleteProgram(prog);throw new Error(label+' program failed to link.');
+  }
+  const locations=new Map();
+  return {prog,loc(name){if(!locations.has(name))locations.set(name,gl.getUniformLocation(prog,name));return locations.get(name);}};
+}
+function mulberry32(seed){return function(){let v=seed+=0x6D2B79F5;v=Math.imul(v^(v>>>15),v|1);v^=v+Math.imul(v^(v>>>7),v|61);return ((v^(v>>>14))>>>0)/4294967296;};}
+const seeded=mulberry32(0x5245474e);
+const dustSeeds=new Float32Array(26*4);
+for(let i=0;i<dustSeeds.length;i++)dustSeeds[i]=seeded();
+const ribbonData=[];
+const ribbonSegments=112;
+for(let i=0;i<=ribbonSegments;i++)ribbonData.push(i/ribbonSegments,-1,i/ribbonSegments,1);
+const ribbonVertices=new Float32Array(ribbonData);
+let sceneProg,fieldProg,dustProg,bloomProg,finishProg,emptyVao,fieldVao,dustVao;
+let targets=[],width=0,height=0,dpr=1,rafId=0,lost=false;
+let frameCount=0;
+function boot(){
+  floatTargets=!!gl.getExtension('EXT_color_buffer_float');
+  storageScale=floatTargets?1:0.25;
+  sceneProg=program(vertexScreen,fragmentScene,'Sculpture');
+  fieldProg=program(vertexField,fragmentField,'Magnetic flux');
+  dustProg=program(vertexDust,fragmentDust,'Studio dust');
+  bloomProg=program(vertexScreen,fragmentBloom,'Bloom');
+  finishProg=program(vertexScreen,fragmentFinish,'Finish');
+  emptyVao=gl.createVertexArray();
+  fieldVao=gl.createVertexArray();gl.bindVertexArray(fieldVao);
+  const fieldBuffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,fieldBuffer);gl.bufferData(gl.ARRAY_BUFFER,ribbonVertices,gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+  dustVao=gl.createVertexArray();gl.bindVertexArray(dustVao);
+  const dustBuffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,dustBuffer);gl.bufferData(gl.ARRAY_BUFFER,dustSeeds,gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,0,0);
+  gl.bindVertexArray(emptyVao);
+  gl.disable(gl.CULL_FACE);
+  targets=[];width=0;height=0;resize();
+}
+function makeTarget(w,h,depth){
+  const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D,0,floatTargets?gl.RGBA16F:gl.RGBA8,w,h,0,gl.RGBA,floatTargets?gl.HALF_FLOAT:gl.UNSIGNED_BYTE,null);
+  const fb=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  let rb=null;
+  if(depth){rb=gl.createRenderbuffer();gl.bindRenderbuffer(gl.RENDERBUFFER,rb);gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT24,w,h);gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,rb);}
+  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error('REGNUM framebuffer is incomplete.');
+  return {tex,fb,rb,w,h};
+}
+function resize(){
+  if(lost)return;
+  const cssW=Math.max(1,innerWidth),cssH=Math.max(1,innerHeight);
+  // DPR-aware rendering. Frozen stills retain full 2x sampling up to 4K size.
+  const budget=frozen?9000000:2300000;
+  const requested=Math.min(2,Math.max(1.5,devicePixelRatio||1));
+  dpr=Math.min(requested,Math.sqrt(budget/(cssW*cssH)));
+  const w=Math.max(2,Math.round(cssW*dpr)),h=Math.max(2,Math.round(cssH*dpr));
+  if(w===width&&h===height)return;
+  width=w;height=h;canvas.width=w;canvas.height=h;
+  for(const t of targets){gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fb);if(t.rb)gl.deleteRenderbuffer(t.rb);}
+  targets=[makeTarget(w,h,true),makeTarget(Math.ceil(w/2),Math.ceil(h/2),false),makeTarget(Math.ceil(w/2),Math.ceil(h/2),false)];
+}
+function normalize(v){const n=Math.hypot(...v);return v.map(x=>x/n);}
+function cross(a,b){return [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];}
+function camera(phase){
+  const a=TAU*(phase-Math.floor(phase));
+  const aspect=width/height;
+  const azimuth=.53+.018*Math.sin(a);
+  const elevation=.40+.008*Math.cos(a);
+  const distance=Math.max(6.75,5.4/aspect);
+  const aim=[0,.70,0];
+  const eye=[Math.sin(azimuth)*Math.cos(elevation)*distance,aim[1]+Math.sin(elevation)*distance,Math.cos(azimuth)*Math.cos(elevation)*distance];
+  const forward=normalize(aim.map((v,i)=>v-eye[i]));
+  const right=normalize(cross(forward,[0,1,0]));
+  const up=cross(right,forward);
+  return {eye,right,up,forward,focal:2.55};
+}
+function common(p,c,phase){
+  gl.uniform2f(p.loc('uResolution'),width,height);gl.uniform1f(p.loc('uPhase'),phase);gl.uniform1f(p.loc('uStorage'),storageScale);
+  gl.uniform3fv(p.loc('uEye'),c.eye);gl.uniform3fv(p.loc('uRight'),c.right);gl.uniform3fv(p.loc('uUp'),c.up);gl.uniform3fv(p.loc('uForward'),c.forward);gl.uniform1f(p.loc('uFocal'),c.focal);
+}
+function bindImage(tex,unit,loc){gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(gl.TEXTURE_2D,tex);gl.uniform1i(loc,unit);}
+function screenPass(p,target){gl.bindFramebuffer(gl.FRAMEBUFFER,target?target.fb:null);gl.viewport(0,0,target?target.w:width,target?target.h:height);gl.useProgram(p.prog);gl.bindVertexArray(emptyVao);}
+function draw(phase){
+  if(lost)return;
+  resize();
+  const cam=camera(phase);
+  screenPass(sceneProg,targets[0]);common(sceneProg,cam,phase);
+  gl.disable(gl.BLEND);gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.ALWAYS);gl.depthMask(true);gl.clearDepth(1);gl.clear(gl.DEPTH_BUFFER_BIT);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  gl.depthFunc(gl.LEQUAL);gl.depthMask(false);gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);
+  gl.useProgram(fieldProg.prog);common(fieldProg,cam,phase);gl.bindVertexArray(fieldVao);
+  gl.uniform1f(fieldProg.loc('uWidth'),4.5*dpr);gl.uniform1f(fieldProg.loc('uCore'),0);gl.drawArraysInstanced(gl.TRIANGLE_STRIP,0,(ribbonSegments+1)*2,7);
+  gl.uniform1f(fieldProg.loc('uWidth'),.66*dpr);gl.uniform1f(fieldProg.loc('uCore'),1);gl.drawArraysInstanced(gl.TRIANGLE_STRIP,0,(ribbonSegments+1)*2,7);
+  gl.useProgram(dustProg.prog);common(dustProg,cam,phase);gl.uniform1f(dustProg.loc('uDpr'),dpr);gl.bindVertexArray(dustVao);gl.drawArrays(gl.POINTS,0,26);
+  gl.disable(gl.BLEND);gl.disable(gl.DEPTH_TEST);gl.depthMask(true);
+  screenPass(bloomProg,targets[1]);gl.uniform1f(bloomProg.loc('uStorage'),storageScale);gl.uniform1i(bloomProg.loc('uBright'),1);gl.uniform2f(bloomProg.loc('uStep'),1.5/width,0);bindImage(targets[0].tex,0,bloomProg.loc('uImage'));gl.drawArrays(gl.TRIANGLES,0,3);
+  screenPass(bloomProg,targets[2]);gl.uniform1i(bloomProg.loc('uBright'),0);gl.uniform2f(bloomProg.loc('uStep'),0,2.6/height);bindImage(targets[1].tex,0,bloomProg.loc('uImage'));gl.drawArrays(gl.TRIANGLES,0,3);
+  screenPass(finishProg,null);gl.uniform1f(finishProg.loc('uStorage'),storageScale);gl.uniform2f(finishProg.loc('uResolution'),width,height);bindImage(targets[0].tex,0,finishProg.loc('uImage'));bindImage(targets[2].tex,1,finishProg.loc('uBloom'));gl.drawArrays(gl.TRIANGLES,0,3);
+  frameCount++;canvas.dataset.ready='true';canvas.dataset.phase=phase.toFixed(8);canvas.dataset.frames=String(frameCount);
+}
+function frame(timestamp){
+  rafId=0;
+  if(lost||document.hidden)return;
+  // The only clock in the artwork. No Date.now, accumulated delta, or simulation.
+  const phase=frozen?frozenPhase:((timestamp/1000)%LOOP)/LOOP;
+  draw(phase);
+  if(!frozen)rafId=requestAnimationFrame(frame);
+}
+function schedule(){if(!lost&&!document.hidden&&!rafId)rafId=requestAnimationFrame(frame);}
+canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();lost=true;if(rafId)cancelAnimationFrame(rafId);rafId=0;});
+canvas.addEventListener('webglcontextrestored',()=>{lost=false;try{boot();schedule();}catch(error){console.error(error);}});
+addEventListener('resize',()=>{if(!lost){resize();schedule();}},{passive:true});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){if(rafId)cancelAnimationFrame(rafId);rafId=0;}else schedule();});
+try{boot();schedule();}catch(error){console.error('REGNUM: '+error.message,error);}
+})();
+</script>
+</body>
+</html>

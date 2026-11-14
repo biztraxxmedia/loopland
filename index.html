@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="favicon.png" type="image/png">
+<title>LoopLand</title>
+<style>
+:root{
+  --bg:#09090d;--bg2:#101018;--card:#16161f;--line:rgba(255,255,255,.08);
+  --text:#eef0f5;--muted:#9595a8;--accent:#7ee0c8;--gold:#e6c37a;--danger:#f0a0a0;
+  --radius:16px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);
+  font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  min-height:100%}
+body{padding-bottom:64px}
+a{color:var(--accent)}
+.wrap{max-width:1280px;margin:0 auto;padding:0 20px}
+header.hero{position:sticky;top:0;z-index:20;background:rgba(9,9,13,.86);
+  backdrop-filter:blur(16px);border-bottom:1px solid var(--line)}
+.hero-inner{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px 24px;
+  padding:18px 0 14px}
+.brand{margin:0;font-size:28px;letter-spacing:.14em;font-weight:650;
+  text-transform:uppercase}
+.brand span{color:var(--accent)}
+.count{color:var(--muted);font-size:13px;margin:0 0 4px}
+.filters{display:flex;flex-wrap:wrap;gap:8px;padding:0 0 14px}
+.chip{appearance:none;border:1px solid var(--line);background:transparent;
+  color:var(--muted);border-radius:999px;padding:6px 12px;font:inherit;cursor:pointer;
+  transition:background .15s,color .15s,border-color .15s}
+.chip:hover{color:var(--text);border-color:rgba(255,255,255,.22)}
+.chip.on{background:var(--text);color:#111;border-color:var(--text)}
+.chip.tier.on{background:var(--accent);border-color:var(--accent);color:#06221c}
+.sep{width:1px;background:var(--line);align-self:stretch;margin:0 4px}
+section.tier{margin:28px 0 8px}
+section.tier.hidden{display:none}
+.tier h2{font-size:13px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--gold);font-weight:650;margin:0 0 14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  overflow:hidden;cursor:pointer;display:flex;flex-direction:column;
+  transition:transform .18s,border-color .18s}
+.card:hover{transform:translateY(-2px);border-color:rgba(126,224,200,.35)}
+.card.hidden{display:none}
+.stage{position:relative;aspect-ratio:16/9;background:#000;overflow:hidden}
+.stage img.poster{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+  display:block;z-index:1}
+.stage iframe{position:absolute;inset:0;width:100%;height:100%;border:0;
+  pointer-events:none;z-index:2;opacity:0;transition:opacity .25s;background:#000}
+.card.live .stage iframe{opacity:1}
+.card.live .stage img.poster{opacity:0;transition:opacity .3s}
+.meta{padding:12px 14px 14px}
+.meta h3{margin:0 0 4px;font-size:16px;font-weight:650}
+.sub{display:flex;gap:8px;flex-wrap:wrap;align-items:center;color:var(--muted);font-size:12px}
+.tag{border:1px solid var(--line);border-radius:999px;padding:1px 8px}
+.empty{color:var(--muted);padding:40px 0;text-align:center}
+#lightbox{position:fixed;inset:0;background:#07070b;z-index:1000;
+  display:none;flex-direction:column}
+#lightbox.open{display:flex}
+#lightbox .bar{display:flex;align-items:center;gap:12px;padding:10px 16px;
+  border-bottom:1px solid var(--line);flex:0 0 auto;background:#07070b;z-index:2}
+#lightbox .bar h3{margin:0;font-size:16px;flex:1}
+#lightbox .bar .sub{margin:0}
+#lightbox .close{appearance:none;border:1px solid var(--line);background:transparent;
+  color:var(--text);border-radius:999px;width:36px;height:36px;font-size:20px;cursor:pointer}
+#lightbox .frame{flex:1;min-height:0;position:relative}
+#lightbox iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000}
+body.lb-open header.hero{visibility:hidden}
+@media (max-width:820px){
+  .brand{font-size:22px;letter-spacing:.1em}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+  .wrap{padding:0 12px}
+}
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <div class="hero-inner">
+      <h1 class="brand">Loop<span>Land</span></h1>
+      <p class="count" id="count"></p>
+    </div>
+    
+    <div class="filters" id="filters"></div>
+  </div>
+</header>
+<main class="wrap" id="tiers"></main>
+<div id="lightbox" role="dialog" aria-modal="true" aria-labelledby="lb-title">
+  <div class="bar">
+    <h3 id="lb-title"></h3>
+    <p class="sub" id="lb-sub"></p>
+    <button type="button" class="close" id="lb-close" aria-label="Close">×</button>
+  </div>
+  <div class="frame" id="lb-frame"></div>
+</div>
+<script>
+window.LOOPLAND_EMBED = false;
+window.LOOPLAND_TIER_ORDER = [{"id":"top-tier","label":"1 · Top Tier"},{"id":"dam-near","label":"1.5 · Dam-Near Top-Tier"},{"id":"solid","label":"2 · Solid"},{"id":"rough","label":"3 · Rough"},{"id":"early","label":"Early"}];
+window.LOOPLAND_PIECES = [{"id":"jellyfish-bloom","title":"Jellyfish Bloom","maker":"ChatGPT","tier":"1.5 · Dam-Near Top-Tier","tierId":"dam-near","poster":"posters/jellyfish-bloom.jpg","src":"pieces/jellyfish-bloom.html"},{"id":"abyssal-bloom","title":"Abyssal Bloom","maker":"ChatGPT","tier":"1.5 · Dam-Near Top-Tier","tierId":"dam-near","poster":"posters/abyssal-bloom.jpg","src":"pieces/abyssal-bloom.html"},{"id":"clockwork-orrery","title":"Clockwork Orrery","maker":"ChatGPT","tier":"1.5 · Dam-Near Top-Tier","tierId":"dam-near","poster":"posters/clockwork-orrery.jpg","src":"pieces/clockwork-orrery.html"},{"id":"ferrofluid-crown","title":"Ferrofluid Crown","maker":"ChatGPT","tier":"1.5 · Dam-Near Top-Tier","tierId":"dam-near","poster":"posters/ferrofluid-crown.jpg","src":"pieces/ferrofluid-crown.html"},{"id":"crystal-cave","title":"Crystal Cave","maker":"ChatGPT","tier":"1.5 · Dam-Near Top-Tier","tierId":"dam-near","poster":"posters/crystal-cave.jpg","src":"pieces/crystal-cave.html"},{"id":"velvet-dunes","title":"Velvet Dunes","maker":"ChatGPT","tier":"2 · Solid","tierId":"solid","poster":"posters/velvet-dunes.jpg","src":"pieces/velvet-dunes.html"},{"id":"lantern-drift","title":"Lantern Drift","maker":"ChatGPT","tier":"2 · Solid","tierId":"solid","poster":"posters/lantern-drift.jpg","src":"pieces/lantern-drift.html"},{"id":"saturn-glass-rings","title":"Saturn Glass Rings","maker":"ChatGPT","tier":"2 · Solid","tierId":"solid","poster":"posters/saturn-glass-rings.jpg","src":"pieces/saturn-glass-rings.html"},{"id":"glass-lotus","title":"Glass Lotus","maker":"ChatGPT","tier":"2 · Solid","tierId":"solid","poster":"posters/glass-lotus.jpg","src":"pieces/glass-lotus.html"},{"id":"obsidian-clockwork","title":"Obsidian Clockwork","maker":"ChatGPT","tier":"2 · Solid","tierId":"solid","poster":"posters/obsidian-clockwork.jpg","src":"pieces/obsidian-clockwork.html"},{"id":"molten-monolith","title":"Molten Monolith","maker":"ChatGPT","tier":"2 · Solid","tierId":"solid","poster":"posters/molten-monolith.jpg","src":"pieces/molten-monolith.html"},{"id":"koi-pond-ink","title":"Koi Pond Ink","maker":"ChatGPT","tier":"2 · Solid","tierId":"solid","poster":"posters/koi-pond-ink.jpg","src":"pieces/koi-pond-ink.html"},{"id":"origami-crane-at-dusk","title":"Origami Crane at Dusk","maker":"ChatGPT","tier":"2 · Solid","tierId":"solid","poster":"posters/origami-crane-at-dusk.jpg","src":"pieces/origami-crane-at-dusk.html"},{"id":"neon-rain-alley","title":"Neon Rain Alley","maker":"ChatGPT","tier":"2 · Solid","tierId":"solid","poster":"posters/neon-rain-alley.jpg","src":"pieces/neon-rain-alley.html"},{"id":"dither-dusk","title":"Dither Dusk","maker":"ChatGPT","tier":"3 · Rough","tierId":"rough","poster":"posters/dither-dusk.jpg","src":"pieces/dither-dusk.html"},{"id":"riso-orbit","title":"Riso Orbit","maker":"ChatGPT","tier":"3 · Rough","tierId":"rough","poster":"posters/riso-orbit.jpg","src":"pieces/riso-orbit.html"},{"id":"stained-glass-drift","title":"Stained Glass Drift","maker":"ChatGPT","tier":"3 · Rough","tierId":"rough","poster":"posters/stained-glass-drift.jpg","src":"pieces/stained-glass-drift.html"},{"id":"truchet-flip","title":"Truchet Flip","maker":"ChatGPT","tier":"3 · Rough","tierId":"rough","poster":"posters/truchet-flip.jpg","src":"pieces/truchet-flip.html"},{"id":"chrome-koi","title":"Chrome Koi","maker":"ChatGPT","tier":"3 · Rough","tierId":"rough","poster":"posters/chrome-koi.jpg","src":"pieces/chrome-koi.html"},{"id":"best-animation-trick-phase-locked-parallax","title":"Best Animation Trick — Phase-Locked Parallax","maker":"ChatGPT","tier":"Early","tierId":"early","poster":"posters/best-animation-trick-phase-locked-parallax.jpg","src":"pieces/best-animation-trick-phase-locked-parallax.html"},{"id":"creator-audio-visualizer","title":"Creator Audio Visualizer","maker":"ChatGPT","tier":"Early","tierId":"early","poster":"posters/creator-audio-visualizer.jpg","src":"pieces/creator-audio-visualizer.html"},{"id":"ancient-lava-lamp","title":"Ancient Lava Lamp","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/ancient-lava-lamp.jpg","src":"pieces/ancient-lava-lamp.html"},{"id":"windshield-drive","title":"Windshield Drive","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/windshield-drive.jpg","src":"pieces/windshield-drive.html"},{"id":"the-crimson-lab","title":"The Crimson Lab","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/the-crimson-lab.jpg","src":"pieces/the-crimson-lab.html"},{"id":"odd-worlds","title":"Odd Worlds","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/odd-worlds.jpg","src":"pieces/odd-worlds.html"},{"id":"goldfish-worlds","title":"Goldfish Worlds","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/goldfish-worlds.jpg","src":"pieces/goldfish-worlds.html"},{"id":"the-lamp-and-the-bowl","title":"The Lamp and the Bowl","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/the-lamp-and-the-bowl.jpg","src":"pieces/the-lamp-and-the-bowl.html"},{"id":"boss-arena-fire-vault","title":"Boss Arena + Fire Vault","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/boss-arena-fire-vault.jpg","src":"pieces/boss-arena-fire-vault.html"},{"id":"scene-gallery","title":"Scene Gallery","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/scene-gallery.jpg","src":"pieces/scene-gallery.html"},{"id":"the-maelstrom","title":"The Maelstrom","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/the-maelstrom.jpg","src":"pieces/the-maelstrom.html"},{"id":"powder-run","title":"Powder Run","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/powder-run.jpg","src":"pieces/powder-run.html"},{"id":"monsters","title":"Monsters","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/monsters.jpg","src":"pieces/monsters.html"},{"id":"ocean-life","title":"Ocean Life","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/ocean-life.jpg","src":"pieces/ocean-life.html"},{"id":"four-wild-worlds","title":"Four Wild Worlds","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/four-wild-worlds.jpg","src":"pieces/four-wild-worlds.html"},{"id":"nostalgia","title":"Nostalgia","maker":"Claude","tier":"Early","tierId":"early","poster":"posters/nostalgia.jpg","src":"pieces/nostalgia.html"},{"id":"m-bius-mercury","title":"Möbius Mercury","maker":"Cody","tier":"Early","tierId":"early","poster":"posters/m-bius-mercury.jpg","src":"pieces/m-bius-mercury.html"},{"id":"event-horizon-silk","title":"Event Horizon Silk","maker":"Cody","tier":"Early","tierId":"early","poster":"posters/event-horizon-silk.jpg","src":"pieces/event-horizon-silk.html"},{"id":"living-camera-anchor-demo","title":"Living Camera Anchor Demo","maker":"Gemini","tier":"Early","tierId":"early","poster":"posters/living-camera-anchor-demo.jpg","src":"pieces/living-camera-anchor-demo.html"},{"id":"procedural-3d-webgl-canvas","title":"Procedural 3D WebGL Canvas","maker":"Gemini","tier":"Early","tierId":"early","poster":"posters/procedural-3d-webgl-canvas.jpg","src":"pieces/procedural-3d-webgl-canvas.html"},{"id":"hypnotic-3d-diorama-loops","title":"Hypnotic 3D Diorama Loops","maker":"Gemini","tier":"Early","tierId":"early","poster":"posters/hypnotic-3d-diorama-loops.jpg","src":"pieces/hypnotic-3d-diorama-loops.html"},{"id":"dynamic-3d-diorama","title":"Dynamic 3D Diorama","maker":"Gemini","tier":"Early","tierId":"early","poster":"posters/dynamic-3d-diorama.jpg","src":"pieces/dynamic-3d-diorama.html"},{"id":"epic-3d-cinematic-diorama-suite","title":"Epic 3D Cinematic Diorama Suite","maker":"Gemini","tier":"Early","tierId":"early","poster":"posters/epic-3d-cinematic-diorama-suite.jpg","src":"pieces/epic-3d-cinematic-diorama-suite.html"},{"id":"grok-neon-tunnel","title":"Neon Tunnel","maker":"Grok","tier":"Early","tierId":"early","poster":"posters/grok-neon-tunnel.jpg","src":"pieces/grok-neon-tunnel.html"},{"id":"grok-light-streaks","title":"Light Streaks","maker":"Grok","tier":"Early","tierId":"early","poster":"posters/grok-light-streaks.jpg","src":"pieces/grok-light-streaks.html"}];
+(function(){
+  const pieces = window.LOOPLAND_PIECES || [];
+  const byId = Object.fromEntries(pieces.map(p => [p.id, p]));
+  const embed = !!window.LOOPLAND_EMBED;
+  const gridRoot = document.getElementById('tiers');
+  const countEl = document.getElementById('count');
+  const filtersEl = document.getElementById('filters');
+  const lb = document.getElementById('lightbox');
+  const lbTitle = document.getElementById('lb-title');
+  const lbSub = document.getElementById('lb-sub');
+  const lbFrame = document.getElementById('lb-frame');
+  let tierF = 'all', makerF = 'all', lbId = null;
+
+  const tiers = [];
+  const seenT = new Set();
+  pieces.forEach(p => { if(!seenT.has(p.tierId)){ seenT.add(p.tierId); tiers.push({id:p.tierId,label:p.tier}); } });
+  const makers = [...new Set(pieces.map(p => p.maker))];
+
+  function chip(label, kind, value){
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip' + (kind==='tier' ? ' tier' : '');
+    b.textContent = label;
+    b.dataset.kind = kind;
+    b.dataset.value = value;
+    return b;
+  }
+  function buildFilters(){
+    filtersEl.innerHTML = '';
+    filtersEl.appendChild(chip('All', 'all', 'all')).classList.add('on');
+    const s = document.createElement('span'); s.className = 'sep'; s.setAttribute('aria-hidden','true');
+    filtersEl.appendChild(s);
+    tiers.forEach(t => filtersEl.appendChild(chip(t.label, 'tier', t.id)));
+    const s2 = document.createElement('span'); s2.className = 'sep'; s2.setAttribute('aria-hidden','true');
+    filtersEl.appendChild(s2);
+    makers.forEach(m => filtersEl.appendChild(chip(m, 'maker', m)));
+  }
+
+  function match(p){
+    if(tierF!=='all' && p.tierId!==tierF) return false;
+    if(makerF!=='all' && p.maker!==makerF) return false;
+    return true;
+  }
+
+  function applyFilter(){
+    let n = 0;
+    document.querySelectorAll('section.tier').forEach(sec => {
+      let any = false;
+      sec.querySelectorAll('.card').forEach(card => {
+        const p = byId[card.dataset.id];
+        const ok = match(p);
+        card.classList.toggle('hidden', !ok);
+        if(ok){ any = true; n++; }
+        else unload(card);
+      });
+      sec.classList.toggle('hidden', !any);
+    });
+    const total = pieces.length;
+    countEl.textContent = (tierF==='all' && makerF==='all')
+      ? (total + ' piece' + (total===1?'':'s'))
+      : ('Showing ' + n + ' of ' + total);
+    document.querySelectorAll('.chip').forEach(c => {
+      const k=c.dataset.kind, v=c.dataset.value;
+      const on = (k==='all' && tierF==='all' && makerF==='all')
+        || (k==='tier' && v===tierF && makerF==='all')
+        || (k==='maker' && v===makerF && (tierF==='all' || true) && k==='maker' && v===makerF && tierF==='all'? false : false);
+    });
+    // simpler on-state
+    document.querySelectorAll('.chip').forEach(c => c.classList.remove('on'));
+    if(tierF==='all' && makerF==='all'){
+      filtersEl.querySelector('[data-kind="all"]').classList.add('on');
+    } else {
+      if(tierF!=='all'){
+        const el = filtersEl.querySelector('.chip[data-kind="tier"][data-value="'+tierF+'"]');
+        if(el) el.classList.add('on');
+      }
+      if(makerF!=='all'){
+        const el = filtersEl.querySelector('.chip[data-kind="maker"][data-value="'+CSS.escape(makerF)+'"]');
+        if(el) el.classList.add('on');
+      }
+      if(tierF==='all' && makerF==='all'){}
+    }
+  }
+
+  filtersEl.addEventListener('click', e => {
+    const b = e.target.closest('.chip'); if(!b) return;
+    const k=b.dataset.kind, v=b.dataset.value;
+    if(k==='all'){ tierF='all'; makerF='all'; }
+    else if(k==='tier'){ tierF = (tierF===v ? 'all' : v); }
+    else if(k==='maker'){ makerF = (makerF===v ? 'all' : v); }
+    applyFilter();
+  });
+
+  function mountIframe(target, p, interactive){
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    iframe.setAttribute('title', p.title);
+    iframe.setAttribute('allow', 'autoplay');
+    if(interactive) iframe.setAttribute('allowfullscreen','');
+    if(embed) iframe.srcdoc = p.html;
+    else iframe.src = p.src;
+    if(!interactive) iframe.tabIndex = -1;
+    target.appendChild(iframe);
+    return iframe;
+  }
+
+  const MAX_LIVE = 8;
+  let still = false;
+  window.LOOPLAND_setStill = function(on){
+    still = !!on;
+    if(still){
+      document.querySelectorAll('.card').forEach(c => unload(c, true));
+    }
+  };
+  function evictIfNeeded(keep){
+    const live = [...document.querySelectorAll('.card.live, .card')].filter(c => c.querySelector('.stage iframe') && c !== keep);
+    if(live.length < MAX_LIVE) return;
+    for(const c of live){
+      const r = c.getBoundingClientRect();
+      const vis = r.bottom > 80 && r.top < (window.innerHeight - 40);
+      if(!vis){ unload(c, true); return; }
+    }
+    if(live[0]) unload(live[0], true);
+  }
+  function load(card){
+    if(still) return;
+    if(card.classList.contains('hidden')) return;
+    const stage = card.querySelector('.stage');
+    if(stage.querySelector('iframe')) return;
+    evictIfNeeded(card);
+    const p = byId[card.dataset.id];
+    const iframe = mountIframe(stage, p, false);
+    iframe.addEventListener('load', () => card.classList.add('live'), {once:true});
+  }
+  function unload(card, force){
+    if(!force && lbId && lbId === card.dataset.id) return;
+    const iframe = card.querySelector('.stage iframe');
+    if(!iframe) return;
+    try{ iframe.src = 'about:blank'; iframe.removeAttribute('srcdoc'); }catch(err){}
+    iframe.remove();
+    card.classList.remove('live');
+  }
+
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(en => {
+      if(en.isIntersecting) load(en.target);
+      else unload(en.target);
+    });
+  }, {rootMargin:'240px 0px', threshold:0.01});
+
+  function buildGrid(){
+    gridRoot.innerHTML = '';
+    const byTier = new Map();
+    pieces.forEach(p => {
+      if(!byTier.has(p.tierId)) byTier.set(p.tierId, []);
+      byTier.get(p.tierId).push(p);
+    });
+    window.LOOPLAND_TIER_ORDER.forEach(({id,label}) => {
+      const list = byTier.get(id); if(!list || !list.length) return;
+      const sec = document.createElement('section');
+      sec.className = 'tier';
+      sec.dataset.tier = id;
+      const h = document.createElement('h2');
+      h.textContent = label;
+      sec.appendChild(h);
+      const grid = document.createElement('div');
+      grid.className = 'grid';
+      list.forEach(p => {
+        const card = document.createElement('article');
+        card.className = 'card';
+        card.dataset.id = p.id;
+        card.setAttribute('tabindex','0');
+        card.setAttribute('role','button');
+        card.setAttribute('aria-label', 'Open '+p.title+' fullscreen');
+        card.innerHTML = '<div class="stage"><img class="poster" alt=""></div>'
+          + '<div class="meta"><h3></h3><div class="sub"><span class="maker"></span>'
+          + '<span class="tag tier-tag"></span></div></div>';
+        const img = card.querySelector('img.poster');
+        img.src = p.poster;
+        img.alt = p.title;
+        card.querySelector('h3').textContent = p.title;
+        card.querySelector('.maker').textContent = p.maker;
+        card.querySelector('.tier-tag').textContent = p.tier;
+        grid.appendChild(card);
+        io.observe(card);
+      });
+      sec.appendChild(grid);
+      gridRoot.appendChild(sec);
+    });
+  }
+
+  function openLB(id){
+    const p = byId[id]; if(!p) return;
+    lbId = id;
+    lbTitle.textContent = p.title;
+    lbSub.textContent = p.maker + ' · ' + p.tier;
+    lbFrame.innerHTML = '';
+    mountIframe(lbFrame, p, true);
+    lb.classList.add('open');
+    document.body.classList.add('lb-open');
+    document.body.style.overflow = 'hidden';
+    document.getElementById('lb-close').focus();
+  }
+  function closeLB(){
+    lb.classList.remove('open');
+    document.body.classList.remove('lb-open');
+    document.body.style.overflow = '';
+    const iframe = lbFrame.querySelector('iframe');
+    if(iframe){ try{ iframe.src='about:blank'; iframe.removeAttribute('srcdoc'); }catch(err){} iframe.remove(); }
+    const was = lbId; lbId = null;
+    lbFrame.innerHTML = '';
+    if(was){
+      const card = document.querySelector('.card[data-id="'+was+'"]');
+      if(card) io.observe(card);
+    }
+  }
+
+  document.addEventListener('click', e => {
+    const card = e.target.closest('.card');
+    if(card && card.closest('#tiers')){ openLB(card.dataset.id); }
+  });
+  document.addEventListener('keydown', e => {
+    if(e.key==='Escape' && lb.classList.contains('open')){ closeLB(); return; }
+    if(e.key==='Enter' || e.key===' '){
+      const card = e.target.closest && e.target.closest('.card');
+      if(card && card.closest('#tiers')){ e.preventDefault(); openLB(card.dataset.id); }
+    }
+  });
+  document.getElementById('lb-close').addEventListener('click', closeLB);
+  lb.addEventListener('click', e => { if(e.target===lb) closeLB(); });
+
+  buildFilters();
+  buildGrid();
+  applyFilter();
+})();
+</script>
+</body>
+</html>

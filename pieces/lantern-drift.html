@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#030708">
+<meta name="description" content="Lantern Drift — a ten-second, deterministic study of luminous paper, night water, and river mist. All imagery is generated locally by shaders.">
+<title>Lantern Drift</title>
+<style>
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#030708}
+canvas{display:block;width:100vw;height:100vh;width:100dvw;height:100dvh;touch-action:none}
+</style>
+<link rel="icon" href="data:,"></head>
+<body>
+<canvas id="river" aria-label="Warm paper lanterns drift through teal night fog above a dark river"></canvas>
+<script>
+/*
+  LANTERN DRIFT
+  A self-contained moving painting. No downloads, libraries, textures, or fonts.
+
+  LOOP CONTRACT
+  The RAF timestamp is the only clock. Its ten-second phase is sent to the GPU
+  as (cos(A), sin(A)); all animation uses that pair or integer harmonics.
+  A lantern rises on the visible half of a closed, depth-receding orbit. The
+  returning arc is veiled in fog. Sway is the second harmonic. No integration,
+  changing random seed, temporal history, adaptive quality, or temporal AA.
+  ?t=0.37 freezes a phase. ?t=1 and ?t=0 are exactly the same render.
+
+  GEOMETRY / LIGHT
+  Perspective camera, ribbed hollow SDF paper shells, bamboo aperture rims,
+  crossed supports and small flames. Ray/sphere rejection keeps the local SDF
+  marches inexpensive. Analytic ellipsoids are used only for rough reflections.
+  The water has a displaced intersection and analytic multi-scale normals.
+  Fog is integrated in world space; bloom uses a spatial pyramid, never history.
+*/
+(() => {
+'use strict';
+const canvas = document.getElementById('river');
+const gl = canvas.getContext('webgl2', {
+  alpha:false, antialias:false, depth:false, stencil:false,
+  powerPreference:'high-performance', preserveDrawingBuffer:true
+});
+if (!gl) { console.error('Lantern Drift requires WebGL 2.'); return; }
+const COUNT = 72;
+const TAU = Math.PI * 2;
+const LOOP = 10;
+const phaseText = new URLSearchParams(location.search).get('t');
+const phaseValue = phaseText === null || phaseText.trim() === '' ? NaN : Number(phaseText);
+const frozenPhase = Number.isFinite(phaseValue) ? ((phaseValue % 1) + 1) % 1 : null;
+const hdr = !!gl.getExtension('EXT_color_buffer_float');
+const storeScale = hdr ? 1 : 0.125;
+const seeds = new Float32Array(COUNT * 4);
+const extras = new Float32Array(COUNT * 4);
+function mulberry32(a) {
+  return function() {
+    let b = a += 0x6D2B79F5;
+    b = Math.imul(b ^ b >>> 15, b | 1);
+    b ^= b + Math.imul(b ^ b >>> 7, b | 61);
+    return ((b ^ b >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rng = mulberry32(0x1A47E2D9);
+for (let i = 0; i < COUNT * 4; ++i) { seeds[i] = rng(); extras[i] = rng(); }
+
+const vertexSource = `#version 300 es
+precision highp float;
+out vec2 kUV;
+void main(){
+  vec2 kPos=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));
+  kUV=kPos;
+  gl_Position=vec4(kPos*2.0-1.0,0.0,1.0);
+}`;
+
+const sceneSource = `#version 300 es
+precision highp float;
+precision highp int;
+in vec2 kUV;
+out vec4 kColor;
+uniform vec2 uResolution;
+uniform vec2 uCycle;
+uniform float uStoreScale;
+uniform vec4 uSeeds[${COUNT}];
+uniform vec4 uExtras[${COUNT}];
+const float kPI=3.141592653589793;
+const float kTAU=6.283185307179586;
+const float kLens=1.52;
+const vec3 kEye=vec3(8.0,0.85,14.0);
+const vec3 kForward=vec3(-0.49613894,0.0,-0.86824314);
+const vec3 kRight=vec3(0.86824314,0.0,-0.49613894);
+const vec3 kCamF=vec3(-0.49508971,0.065,-0.86640706);
+const vec3 kCamU=vec3(0.03224903,0.99788526,0.05643580);
+const vec3 kAmber=vec3(1.0,0.365,0.064);
+const vec3 kTeal=vec3(0.018,0.24,0.255);
+
+float kHash(vec3 kP){
+  kP=fract(kP*0.1031);
+  kP+=dot(kP,kP.yzx+33.33);
+  return fract((kP.x+kP.y)*kP.z);
+}
+float kField(vec3 kP){
+  vec3 kI=floor(kP),kF=fract(kP);
+  kF=kF*kF*(3.0-2.0*kF);
+  return mix(mix(mix(kHash(kI),kHash(kI+vec3(1,0,0)),kF.x),
+                 mix(kHash(kI+vec3(0,1,0)),kHash(kI+vec3(1,1,0)),kF.x),kF.y),
+             mix(mix(kHash(kI+vec3(0,0,1)),kHash(kI+vec3(1,0,1)),kF.x),
+                 mix(kHash(kI+vec3(0,1,1)),kHash(kI+vec3(1,1,1)),kF.x),kF.y),kF.z);
+}
+float kFbm(vec3 kP){
+  return 0.57*kField(kP)+0.285*kField(kP*2.07+7.3)+0.145*kField(kP*4.19+19.1);
+}
+vec2 kHarmonic2(){return vec2(uCycle.x*uCycle.x-uCycle.y*uCycle.y,2.0*uCycle.x*uCycle.y);}
+vec2 kHarmonic3(){vec2 kB=kHarmonic2();return vec2(kB.x*uCycle.x-kB.y*uCycle.y,kB.y*uCycle.x+kB.x*uCycle.y);}
+vec2 kShift(vec2 kB,float kOffset){
+  vec2 kC=vec2(cos(kOffset),sin(kOffset));
+  return vec2(kB.x*kC.x-kB.y*kC.y,kB.y*kC.x+kB.x*kC.y);
+}
+mat3 kTurn(float kYaw,float kLean){
+  float kC=cos(kYaw),kS=sin(kYaw),kD=cos(kLean),kT=sin(kLean);
+  return mat3(kC,0,-kS,0,1,0,kS,0,kC)*mat3(kD,kT,0,-kT,kD,0,0,0,1);
+}
+
+void kLantern(int kId,out vec3 kC,out float kR,out mat3 kRot,out float kVis){
+  vec4 kS=uSeeds[kId],kE=uExtras[kId];
+  vec2 kB=kShift(uCycle,kS.x*kTAU);
+  vec2 kB2=kShift(kHarmonic2(),kS.x*kTAU+1.4);
+  float kAspect=uResolution.x/uResolution.y;
+  float kSpread=min(kAspect,1.30);
+  float kX=mix(-0.42,0.35,kS.y)*kSpread+0.019*kB2.y*min(kAspect,1.0);
+  float kY=0.125+0.195*kB.y+0.028*(kS.z-0.5);
+  float kDepth=27.0-9.0*kB.x+19.0*kS.w;
+  kR=0.27+0.41*kE.x;
+  kVis=smoothstep(-0.47,0.30,kB.x);
+  if(kId>=60){kR*=0.65;kDepth+=14.0;}
+  float kSafeX=max(0.02,kAspect*0.5-kR*1.65*kLens/kDepth-0.018);
+  kX=clamp(kX,-kSafeX,kSafeX);
+  if(kId==0){
+    kX=0.105*min(kAspect,1.20)+0.012*kHarmonic2().y;
+    kY=0.067+0.011*uCycle.y;
+    kDepth=10.0+0.16*uCycle.x;
+    kR=1.385;
+    kVis=1.0;
+  }
+  if(kId==1){
+    kX=-0.227*min(kAspect,1.2)+0.018*kB2.y;
+    kY=-0.013+0.027*uCycle.y;
+    kDepth=15.0+0.30*kB.x;
+    kR=0.80;
+    kVis=1.0;
+  }
+  if(kId==2){
+    kX=-0.135*min(kAspect,1.2)+0.012*kB2.y;
+    kY=0.262+0.023*kB.y;
+    kDepth=20.0+0.36*kB.x;
+    kR=0.69;
+    kVis=1.0;
+  }
+  if(kId<3)kR*=min(1.0,kAspect/0.66);
+  kC=kEye+kCamF*kDepth+kRight*(kX*kDepth/kLens)+kCamU*(kY*kDepth/kLens);
+  float kPitch=-0.18+0.025*kB2.y;
+  float kPc=cos(kPitch),kPs=sin(kPitch);
+  kRot=kTurn(0.40+0.16*kB.y+0.3*kE.z,0.033*kB2.y)*mat3(1,0,0,0,kPc,kPs,0,-kPs,kPc);
+}
+
+float kEllipsoid(vec3 kP,vec3 kR){
+  float kA=length(kP/kR),kB=length(kP/(kR*kR));
+  return kA*(kA-1.0)/max(kB,0.00001);
+}
+float kCapsule(vec3 kP,vec3 kA,vec3 kB,float kR){
+  vec3 kQ=kP-kA,kD=kB-kA;
+  return length(kQ-kD*clamp(dot(kQ,kD)/dot(kD,kD),0.0,1.0))-kR;
+}
+float kEnvelope(vec3 kP){
+  float kAng=atan(kP.z,kP.x);
+  float kFlute=0.016*cos(12.0*kAng)*(1.0-smoothstep(0.35,1.4,abs(kP.y)));
+  return kEllipsoid(kP,vec3(1.0,1.43,1.0))+kFlute;
+}
+vec2 kShell(vec3 kP,float kSeed){
+  float kPaper=max(abs(kEnvelope(kP))-0.008,-kP.y-1.145);
+  float kRim=length(vec2(length(kP.xz)-0.598,kP.y+1.145))-0.017;
+  float kSupport=min(kCapsule(kP,vec3(-0.59,-1.143,0),vec3(0.59,-1.143,0),0.009),
+                     kCapsule(kP,vec3(0,-1.143,-0.59),vec3(0,-1.143,0.59),0.009));
+  float kBurner=kEllipsoid(kP-vec3(0,-1.137,0),vec3(0.13,0.029,0.13));
+  vec2 kD=vec2(kPaper,0.0);
+  if(kRim<kD.x)kD=vec2(kRim,1.0);
+  if(kSupport<kD.x)kD=vec2(kSupport,1.0);
+  if(kBurner<kD.x)kD=vec2(kBurner,1.0);
+  vec2 kF=kShift(kHarmonic2(),kSeed*6.0);
+  vec3 kFlameP=kP-vec3(0.023*kF.y,-0.994+0.012*kF.x,0);
+  float kFlame=kEllipsoid(kFlameP,vec3(0.060,0.155+0.012*kF.x,0.060));
+  if(kFlame<kD.x)kD=vec2(kFlame,2.0);
+  return kD;
+}
+vec3 kNormal(vec3 kP,float kSeed){
+  vec2 kE=vec2(0.0015,-0.0015);
+  return normalize(kE.xyy*kShell(kP+kE.xyy,kSeed).x+kE.yyx*kShell(kP+kE.yyx,kSeed).x+
+                   kE.yxy*kShell(kP+kE.yxy,kSeed).x+kE.xxx*kShell(kP+kE.xxx,kSeed).x);
+}
+float kOcclusion(vec3 kP,vec3 kN,float kSeed){
+  float kOcc=0.0,kW=1.0;
+  for(int kJ=1;kJ<=4;kJ++){
+    float kH=0.035*float(kJ);
+    kOcc+=max(0.0,kH-kShell(kP+kN*kH,kSeed).x)*kW;
+    kW*=0.58;
+  }
+  return clamp(1.0-kOcc*3.2,0.35,1.0);
+}
+float kSoftShadow(vec3 kP,vec3 kD,float kSeed){
+  float kShade=1.0,kT=0.025;
+  for(int kJ=0;kJ<10;kJ++){
+    float kH=kShell(kP+kD*kT,kSeed).x;
+    kShade=min(kShade,9.0*max(kH,0.0)/kT);
+    kT+=clamp(kH,0.022,0.14);
+  }
+  return clamp(kShade,0.12,1.0);
+}
+
+vec3 kEnvironment(vec3 kD){
+  float kAz=atan(kD.z,kD.x);
+  vec3 kC=mix(vec3(0.0007,0.0017,0.002),vec3(0.004,0.009,0.011),max(kD.y,0.0));
+  kC+=vec3(0.20,0.29,0.27)*exp(-pow((kD.y-0.73)/0.21,2.0))*exp(-pow((kAz+0.55)/0.52,2.0));
+  kC+=vec3(0.92,0.59,0.28)*exp(-pow((kAz-1.25)/0.44,2.0))*exp(-pow((kD.y-0.31)/0.37,2.0))*0.72;
+  kC+=vec3(0.018,0.61,0.64)*exp(-pow((kAz+2.15)/0.23,2.0))*exp(-pow((kD.y-0.18)/0.48,2.0))*0.65;
+  kC+=vec3(0.026,0.12,0.12)*exp(-abs(kD.y-0.025)*31.0);
+  return kC;
+}
+
+vec3 kPaperLight(vec3 kQ,vec3 kN,vec3 kV,vec3 kWorldN,mat3 kRot,float kSeed){
+  float kAng=atan(kQ.z,kQ.x);
+  float kRib=exp(-pow(sin(kAng*6.0)*24.0,2.0));
+  float kJoin=exp(-pow((kAng-0.43)*90.0,2.0));
+  float kPaperF=kField(kQ*67.0+vec3(kSeed*30.0));
+  float kWrinkle=sin(kQ.y*48.0+sin(kAng*9.0)*1.4+kField(kQ*9.0)*3.0);
+  float kThin=0.91+0.095*kPaperF+0.018*kWrinkle;
+  float kView=clamp(dot(kN,kV),0.0,1.0);
+  vec3 kToFire=kQ-vec3(-0.07,-0.83,0.12);
+  float kHeat=1.10/(0.63+dot(kToFire,kToFire)*0.52);
+  vec3 kTint=mix(vec3(1.0,0.205,0.024),vec3(1.0,0.57,0.23),smoothstep(-1.12,1.2,kQ.y));
+  float kFace=0.73+0.27*max(dot(kN,normalize(vec3(-0.4,0.35,1.0))),0.0);
+  float kFold=0.92+0.08*cos(12.0*kAng+0.04*kWrinkle);
+  vec3 kC=kTint*(0.20+kHeat*0.52)*kThin*kFace*mix(0.22,1.0,pow(kView,0.60))*kFold;
+  float kBand=exp(-pow((kQ.y+0.82)*115.0,2.0))+0.45*exp(-pow((kQ.y-0.63)*125.0,2.0));
+  kC*=1.0-0.34*kRib-0.14*kJoin-0.10*kBand;
+  kC+=vec3(1.0,0.71,0.32)*kRib*0.045;
+  float kAO=kOcclusion(kQ,kN,kSeed);
+  vec3 kL=normalize(transpose(kRot)*normalize(vec3(-0.8,1.0,0.65)));
+  float kShadow=kSoftShadow(kQ+kN*0.015,kL,kSeed);
+  kC+=vec3(0.13,0.10,0.063)*max(dot(kN,kL),0.0)*kShadow*kAO;
+  float kFres=0.05+0.95*pow(1.0-kView,4.0);
+  vec3 kReflect=reflect(-(kRot*kV),kWorldN);
+  kC+=kEnvironment(kReflect)*(0.045+0.15*kFres);
+  kC+=vec3(0.014,0.32,0.34)*pow(1.0-kView,2.7)*max(dot(kWorldN,normalize(vec3(-1.0,0.25,0.6))),0.0)*0.75;
+  return kC;
+}
+
+vec3 kSky(vec3 kD){
+  float kH=exp(-pow((kD.y-0.035)/0.11,2.0));
+  vec3 kC=vec3(0.00085,0.0017,0.0023)+vec3(0.0009,0.0050,0.0052)*kH;
+  float kAz=atan(kD.z,kD.x);
+  float kBank=0.003+0.018*sin(kAz*7.0+0.5)+0.013*sin(kAz*13.0+1.3)+0.005*sin(kAz*31.0);
+  float kLand=1.0-smoothstep(kBank-0.002,kBank+0.002,kD.y);
+  kC=mix(kC,vec3(0.0003,0.00085,0.0009),kLand*0.85);
+  return kC;
+}
+
+vec3 kFog(vec3 kD,float kEnd,vec3 kHero,vec3 kCompanion,out float kTrans){
+  vec3 kSum=vec3(0.0);
+  kTrans=1.0;
+  vec3 kLoopP=vec3(uCycle.x*1.8,uCycle.y*0.40,uCycle.y*1.4);
+  float kMax=min(kEnd,88.0);
+  float kJitter=kHash(vec3(floor(gl_FragCoord.xy),13.7));
+  for(int kJ=0;kJ<20;kJ++){
+    float kS=(float(kJ)+0.5+0.60*(kJitter-0.5))/20.0;
+    float kT=kMax*kS*kS;
+    float kStep=kMax*(2.0*kS/20.0);
+    vec3 kP=kEye+kD*kT;
+    float kF=kFbm(kP*vec3(0.16,0.41,0.16)+kLoopP);
+    float kLow=exp(-max(kP.y,0.0)*0.62);
+    float kVeil=exp(-pow((kP.y-2.0-0.8*kF)/1.6,2.0));
+    float kDensity=(0.014*kLow+0.0065*kVeil)*smoothstep(0.18,0.79,kF);
+    float kAtt=exp(-kDensity*kStep);
+    float kD0=dot(kP-kHero,kP-kHero),kD1=dot(kP-kCompanion,kP-kCompanion);
+    vec3 kIllum=vec3(0.013,0.057,0.062)*(0.55+0.45*kF);
+    kIllum+=kAmber*(1.15/(1.0+kD0*0.35)+0.62/(1.0+kD1*0.35));
+    float kShaft=pow(max(0.0,cos(dot(kP.xz,vec2(0.22,0.17))+0.38*uCycle.y)),12.0);
+    kIllum+=vec3(0.004,0.044,0.047)*kShaft;
+    kSum+=kTrans*(1.0-kAtt)*kIllum;
+    kTrans*=kAtt;
+  }
+  return kSum;
+}
+
+vec3 kWave(vec2 kP){
+  vec2 kB2=kHarmonic2(),kB3=kHarmonic3();
+  float kH=0.0;vec2 kG=vec2(0.0);
+  // Each traveling wave is expressed as sin(spatialPhase + n*A).
+  vec2 kD=vec2(0.56,0.19);float kQ=dot(kP,kD);
+  float kS=sin(kQ)*uCycle.x+cos(kQ)*uCycle.y;
+  float kC=cos(kQ)*uCycle.x-sin(kQ)*uCycle.y;
+  kH+=0.045*kS;kG+=0.045*kC*kD;
+  kD=vec2(-0.76,1.21);kQ=dot(kP,kD);
+  kS=sin(kQ)*kB2.x+cos(kQ)*kB2.y;kC=cos(kQ)*kB2.x-sin(kQ)*kB2.y;
+  kH+=0.020*kS;kG+=0.020*kC*kD;
+  kD=vec2(2.8,1.9);kQ=dot(kP,kD);
+  kS=sin(kQ)*kB3.x+cos(kQ)*kB3.y;kC=cos(kQ)*kB3.x-sin(kQ)*kB3.y;
+  kH+=0.008*kS;kG+=0.008*kC*kD;
+  kD=vec2(-7.5,13.8);kQ=dot(kP,kD)+sin(kP.x*1.7)*0.6;
+  kS=sin(kQ)*kB2.x-cos(kQ)*kB2.y;kC=cos(kQ)*kB2.x+sin(kQ)*kB2.y;
+  kH+=0.0032*kS;kG+=0.0032*kC*(kD+vec2(1.02*cos(kP.x*1.7),0));
+  kD=vec2(22.0,31.0);kQ=dot(kP,kD);
+  kS=sin(kQ)*kB3.x+cos(kQ)*kB3.y;kC=cos(kQ)*kB3.x-sin(kQ)*kB3.y;
+  kH+=0.0008*kS;kG+=0.0008*kC*kD;
+  return vec3(kH,kG);
+}
+
+vec3 kWater(vec3 kD,out float kWaterT){
+  kWaterT=-kEye.y/min(kD.y,-0.0001);
+  for(int kJ=0;kJ<3;kJ++){
+    vec3 kP=kEye+kD*kWaterT;
+    kWaterT=(kWave(kP.xz).x-kEye.y)/min(kD.y,-0.0001);
+  }
+  vec3 kP=kEye+kD*kWaterT;
+  vec3 kW=kWave(kP.xz);
+  float kDistanceSoft=1.0/(1.0+0.0013*kWaterT*kWaterT);
+  vec3 kN=normalize(vec3(-kW.y*kDistanceSoft,1.0,-kW.z*kDistanceSoft));
+  vec3 kR=reflect(kD,kN);
+  float kFres=0.022+0.978*pow(1.0-max(dot(kN,-kD),0.0),5.0);
+  vec3 kC=vec3(0.0005,0.0017,0.0020)+kEnvironment(kR)*kFres*0.065;
+  vec3 kMirror=vec3(0.0),kGlint=vec3(0.0);
+  float kNear=1e5;
+  for(int kI=0;kI<${COUNT};kI++){
+    vec3 kLc;float kSize,kVis;mat3 kRot;
+    kLantern(kI,kLc,kSize,kRot,kVis);
+    if(kVis<0.003)continue;
+    vec3 kDim=vec3(kSize,kSize*1.43,kSize);
+    vec3 kO=(kP-kLc)/kDim,kV=kR/kDim;
+    float kB=dot(kO,kV),kA=dot(kV,kV),kDisc=kB*kB-kA*(dot(kO,kO)-1.0);
+    float kAtt=exp(-length(kLc-kEye)*0.012)*kVis;
+    if(kDisc>0.0){
+      float kT=(-kB-sqrt(kDisc))/kA;
+      if(kT>0.0&&kT<kNear){
+        kNear=kT;
+        vec3 kQ=transpose(kRot)*((kP+kR*kT-kLc)/kSize);
+        float kAng=atan(kQ.z,kQ.x);
+        float kRib=exp(-pow(sin(6.0*kAng)*22.0,2.0));
+        vec3 kTint=mix(vec3(1.0,0.28,0.036),vec3(1.0,0.62,0.23),smoothstep(-1.2,1.3,kQ.y));
+        float kReflectionBlur=smoothstep(0.0,0.18,kDisc/max(kA,0.001));
+        float kHeat=1.0/(0.63+dot(kQ-vec3(-0.07,-0.83,0.12),kQ-vec3(-0.07,-0.83,0.12))*0.52);
+        float kContour=pow(clamp(1.0-0.38*dot(kQ.xz,kQ.xz),0.1,1.0),0.60);
+        kMirror=kTint*(0.23+0.43*kHeat)*kContour*(1.0-0.26*kRib)*kAtt*kReflectionBlur;
+      }
+    }
+    vec3 kToLight=kLc-kP;
+    float kLightDist=length(kToLight);
+    vec3 kH=normalize(kToLight/kLightDist-kD);
+    float kHighlight=pow(max(dot(kN,kH),0.0),160.0);
+    kGlint+=kAmber*kHighlight*kSize*kSize/(1.0+kLightDist*kLightDist*0.025)*0.11*kAtt;
+    float kAlong=max(0.0,dot(kLc-kP,kR));
+    vec3 kAcross=kP+kR*kAlong-kLc;
+    float kHalo=exp(-dot(kAcross,kAcross)/(kSize*kSize*8.0+0.1));
+    kC+=kAmber*kHalo*kAtt*0.009*kSize;
+  }
+  kC+=kMirror*kFres*0.78+kGlint;
+  float kHaze=1.0-exp(-kWaterT*0.009);
+  return mix(kC,vec3(0.0015,0.006,0.0065),kHaze*0.6);
+}
+
+void main(){
+  vec2 kQ=(gl_FragCoord.xy-0.5*uResolution)/uResolution.y;
+  vec3 kRay=normalize(kCamF*kLens+kRight*kQ.x+kCamU*kQ.y);
+  vec3 kHero,kCompanion;float kR0,kR1,kV0,kV1;mat3 kM0,kM1;
+  kLantern(0,kHero,kR0,kM0,kV0);kLantern(1,kCompanion,kR1,kM1,kV1);
+  float kDepth=100.0,kWaterT=10000.0;
+  vec3 kBase=kSky(kRay);
+  if(kRay.y<-0.002){
+    vec3 kWet=kWater(kRay,kWaterT);
+    kBase=mix(kBase,kWet,smoothstep(0.002,0.025,-kRay.y));
+    kDepth=min(kWaterT,100.0);
+  }
+  float kHitT=kDepth;int kHitId=-1;
+  vec3 kHitP=vec3(0.0);mat3 kHitRot=mat3(1.0);float kHitMat=0.0;
+  vec3 kHalos=vec3(0.0);
+  for(int kI=0;kI<${COUNT};kI++){
+    vec3 kLc;float kSize,kVis;mat3 kRot;
+    kLantern(kI,kLc,kSize,kRot,kVis);
+    if(kVis<0.003)continue;
+    vec3 kOff=kEye-kLc;
+    float kB=dot(kOff,kRay),kAlong=-kB;
+    if(kAlong<=0.0)continue;
+    vec3 kPerp=kOff+kAlong*kRay;
+    float kRad2=dot(kPerp,kPerp)/(kSize*kSize);
+    float kAtt=exp(-kAlong*0.010)*kVis;
+    if(kAlong<kDepth+2.0){
+      float kGlow=0.026*exp(-kRad2*0.54)+0.0025*exp(-kRad2*0.055);
+      kHalos+=kAmber*kGlow*kAtt;
+    }
+    float kDisc=kB*kB-dot(kOff,kOff)+kSize*kSize*2.34;
+    if(kDisc<0.0)continue;
+    float kT=max(0.0,(-kB-sqrt(kDisc))/kSize);
+    float kExit=(-kB+sqrt(kDisc))/kSize;
+    vec3 kO=transpose(kRot)*kOff/kSize,kD=transpose(kRot)*kRay;
+    for(int kJ=0;kJ<62;kJ++){
+      vec3 kP=kO+kD*kT;
+      vec2 kDist=kShell(kP,uSeeds[kI].x);
+      float kEps=max(0.00065,(kT*kSize)*0.000055/kSize);
+      if(kDist.x<kEps){
+        float kWorldT=kT*kSize;
+        if(kWorldT<kHitT){
+          kHitT=kWorldT;kHitId=kI;kHitP=kP;kHitRot=kRot;kHitMat=kDist.y;
+        }
+        break;
+      }
+      kT+=max(kDist.x*0.85,0.0003);
+      if(kT>kExit||kT*kSize>kHitT)break;
+    }
+  }
+  if(kHitId>=0){
+    vec3 kN=kNormal(kHitP,uSeeds[kHitId].x);
+    vec3 kV=transpose(kHitRot)*(-kRay);
+    vec3 kWorldN=kHitRot*kN;
+    vec3 kC=kPaperLight(kHitP,kN,kV,kWorldN,kHitRot,uSeeds[kHitId].x);
+    if(kHitMat>0.5&&kHitMat<1.5){
+      float kFres=pow(1.0-max(dot(kN,kV),0.0),4.0);
+      kC=vec3(0.10,0.035,0.009)*(0.5+0.5*max(kN.y,0.0));
+      kC+=kEnvironment(reflect(kRay,kWorldN))*(0.12+0.45*kFres);
+      kC+=kAmber*0.18*exp(-length(kHitP-vec3(0,-1.0,0))*1.8);
+    }
+    if(kHitMat>1.5){kC=vec3(4.9,2.5,0.48)*(0.86+0.14*kHarmonic3().x);}
+    vec3 kLc;float kSize,kVis;mat3 kRot;
+    kLantern(kHitId,kLc,kSize,kRot,kVis);
+    // Returning lanterns dissolve through depth fog without a positional wrap.
+    kBase=mix(kBase,kC,kVis);
+    kDepth=kHitT;
+  }
+  float kTrans;
+  vec3 kMist=kFog(kRay,kDepth,kHero,kCompanion,kTrans);
+  vec3 kC=kBase*kTrans+kMist+kHalos;
+  // Fine ash motes occupy three deterministic world-space depth planes.
+  for(int kJ=0;kJ<3;kJ++){
+    float kPlane=10.0+float(kJ)*12.0;
+    vec3 kP=kEye+kRay*kPlane;
+    vec2 kDrift=vec2(uCycle.y*0.025,kHarmonic2().y*0.016);
+    vec2 kCellP=kP.xy*(2.1+float(kJ)*0.5)+kDrift;
+    vec2 kCell=floor(kCellP),kSub=fract(kCellP)-0.5;
+    float kRnd=kHash(vec3(kCell,float(kJ)+79.0));
+    float kDot=exp(-dot(kSub,kSub)*(kJ==0?180.0:500.0));
+    float kGate=smoothstep(0.994,1.0,kRnd);
+    kC+=vec3(0.09,0.23,0.22)*kDot*kGate*0.10;
+  }
+  float kDefocus=clamp(abs(kDepth-10.0)/max(kDepth,1.0),0.0,1.0);
+  kColor=vec4(max(kC,vec3(0.0))*uStoreScale,kDefocus);
+}`;
+
+const bloomSource = `#version 300 es
+precision highp float;
+in vec2 kUV;
+out vec4 kColor;
+uniform sampler2D uSource;
+uniform vec2 uTexel;
+uniform float uFirst;
+uniform float uStoreScale;
+vec3 kFetch(vec2 kP){
+  vec3 kC=texture(uSource,kP).rgb;
+  if(uFirst>0.5){
+    kC/=uStoreScale;
+    float kBright=max(kC.r,max(kC.g,kC.b));
+    float kSoft=clamp((kBright-0.24)/0.75,0.0,1.0);
+    kC*=kSoft*kSoft*0.75;
+    kC*=uStoreScale;
+  }
+  return kC;
+}
+void main(){
+  vec2 kD=uTexel*1.35;
+  vec3 kC=kFetch(kUV)*0.20;
+  kC+=(kFetch(kUV+kD*vec2(1,1))+kFetch(kUV+kD*vec2(-1,1))+
+        kFetch(kUV+kD*vec2(1,-1))+kFetch(kUV-kD))*0.125;
+  kC+=(kFetch(kUV+kD*vec2(2,0))+kFetch(kUV-kD*vec2(2,0))+
+        kFetch(kUV+kD*vec2(0,2))+kFetch(kUV-kD*vec2(0,2)))*0.075;
+  kColor=vec4(kC,1);
+}`;
+
+const finalSource = `#version 300 es
+precision highp float;
+in vec2 kUV;
+out vec4 kColor;
+uniform sampler2D uScene;
+uniform sampler2D uBloom0;
+uniform sampler2D uBloom1;
+uniform sampler2D uBloom2;
+uniform sampler2D uBloom3;
+uniform sampler2D uBloom4;
+uniform vec2 uResolution;
+uniform vec2 uCycle;
+uniform float uStoreScale;
+vec3 kFilmic(vec3 kX){return clamp((kX*(2.51*kX+0.03))/(kX*(2.43*kX+0.59)+0.14),0.0,1.0);}
+float kGrain(vec3 kP){kP=fract(kP*0.1031);kP+=dot(kP,kP.yzx+33.33);return fract((kP.x+kP.y)*kP.z);}
+vec3 kFocused(vec2 kP){
+  vec4 kCenter=texture(uScene,kP);
+  vec2 kD=vec2(1.0)/uResolution*kCenter.a*1.7;
+  vec3 kSum=kCenter.rgb;float kWeight=1.0;
+  for(int kJ=0;kJ<6;kJ++){
+    float kA=float(kJ)*1.04719755;
+    vec4 kTap=texture(uScene,kP+kD*vec2(cos(kA),sin(kA)));
+    float kW=0.42*(1.0-smoothstep(0.12,0.48,abs(kTap.a-kCenter.a)));
+    kSum+=kTap.rgb*kW;kWeight+=kW;
+  }
+  return kSum/kWeight;
+}
+void main(){
+  vec2 kEdge=kUV-0.5;
+  vec2 kShift=kEdge*dot(kEdge,kEdge)*0.0016;
+  vec3 kC=kFocused(kUV);
+  kC.r=mix(kC.r,texture(uScene,kUV+kShift).r,0.40);
+  kC.b=mix(kC.b,texture(uScene,kUV-kShift).b,0.40);
+  kC+=texture(uBloom0,kUV).rgb*0.16+texture(uBloom1,kUV).rgb*0.16+
+      texture(uBloom2,kUV).rgb*0.13+texture(uBloom3,kUV).rgb*0.105+texture(uBloom4,kUV).rgb*0.075;
+  kC/=uStoreScale;
+  float kVignette=1.0-0.30*smoothstep(0.13,0.67,length(kEdge*vec2(0.85,1.0)));
+  kC=kFilmic(kC*1.10*kVignette);
+  kC=pow(kC,vec3(1.0/2.2));
+  float kG=kGrain(vec3(gl_FragCoord.xy+uCycle*137.0,17.0+uCycle.x*9.0+uCycle.y*11.0))-0.5;
+  kC+=kG*(0.0020+0.0025*sqrt(max(dot(kC,vec3(0.2126,0.7152,0.0722)),0.0)));
+  kColor=vec4(clamp(kC,0.0,1.0),1.0);
+}`;
+
+function compile(type, source, label) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  const log = gl.getShaderInfoLog(shader);
+  if (log && log.trim()) console.warn(label + ':\n' + log);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error(label + ' failed to compile:\n' + log);
+    gl.deleteShader(shader);
+    throw new Error(label + ' shader compilation failed.');
+  }
+  return shader;
+}
+function program(fragment, label) {
+  const vert = compile(gl.VERTEX_SHADER, vertexSource, label + ' vertex');
+  const frag = compile(gl.FRAGMENT_SHADER, fragment, label + ' fragment');
+  const p = gl.createProgram();
+  gl.attachShader(p, vert); gl.attachShader(p, frag); gl.linkProgram(p);
+  const log = gl.getProgramInfoLog(p);
+  if (log && log.trim()) console.warn(label + ' link:\n' + log);
+  gl.deleteShader(vert); gl.deleteShader(frag);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    console.error(label + ' failed to link:\n' + log);
+    gl.deleteProgram(p);
+    throw new Error(label + ' program link failed.');
+  }
+  return p;
+}
+let sceneProgram, bloomProgram, finalProgram;
+try {
+  sceneProgram=program(sceneSource,'River and lanterns');
+  bloomProgram=program(bloomSource,'Bloom pyramid');
+  finalProgram=program(finalSource,'Filmic finish');
+} catch (error) { console.error(error); return; }
+const uniform = (p,n) => gl.getUniformLocation(p,n);
+const sceneU={resolution:uniform(sceneProgram,'uResolution'),cycle:uniform(sceneProgram,'uCycle'),scale:uniform(sceneProgram,'uStoreScale')};
+const bloomU={texel:uniform(bloomProgram,'uTexel'),first:uniform(bloomProgram,'uFirst')};
+const finalU={resolution:uniform(finalProgram,'uResolution'),cycle:uniform(finalProgram,'uCycle')};
+gl.bindVertexArray(gl.createVertexArray());
+gl.useProgram(sceneProgram);
+gl.uniform4fv(uniform(sceneProgram,'uSeeds[0]'),seeds);
+gl.uniform4fv(uniform(sceneProgram,'uExtras[0]'),extras);
+gl.uniform1f(sceneU.scale,storeScale);
+gl.useProgram(bloomProgram);
+gl.uniform1i(uniform(bloomProgram,'uSource'),0);
+gl.uniform1f(uniform(bloomProgram,'uStoreScale'),storeScale);
+gl.useProgram(finalProgram);
+gl.uniform1f(uniform(finalProgram,'uStoreScale'),storeScale);
+['uScene','uBloom0','uBloom1','uBloom2','uBloom3','uBloom4'].forEach((n,i)=>gl.uniform1i(uniform(finalProgram,n),i));
+gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+
+let sceneTarget=null, bloomTargets=[], width=0, height=0, rafId=0;
+function destroyTarget(target) {
+  if (!target) return;
+  gl.deleteTexture(target.tex); gl.deleteFramebuffer(target.fbo);
+}
+function makeTarget(w,h) {
+  const tex=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D,0,hdr?gl.RGBA16F:gl.RGBA8,w,h,0,gl.RGBA,hdr?gl.HALF_FLOAT:gl.UNSIGNED_BYTE,null);
+  const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error('Incomplete render target.');
+  return {tex,fbo,w,h};
+}
+function resize() {
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  const maxDim=Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE),gl.getParameter(gl.MAX_VIEWPORT_DIMS)[0]);
+  const scale=Math.min(dpr,maxDim/Math.max(innerWidth,innerHeight));
+  const w=Math.max(1,Math.round(innerWidth*scale)),h=Math.max(1,Math.round(innerHeight*scale));
+  if(w===width&&h===height)return;
+  width=w;height=h;canvas.width=w;canvas.height=h;
+  destroyTarget(sceneTarget);bloomTargets.forEach(destroyTarget);
+  sceneTarget=makeTarget(w,h);bloomTargets=[];
+  for(let i=0;i<5;i++)bloomTargets.push(makeTarget(Math.max(1,w>>(i+1)),Math.max(1,h>>(i+1))));
+}
+function draw(phase) {
+  resize();
+  // Canonicalize the seam before sin/cos, including negative and >1 phases.
+  const p=((phase%1)+1)%1;
+  const a=TAU*p,c=Math.cos(a),s=Math.sin(a);
+  gl.useProgram(sceneProgram);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,sceneTarget.fbo);gl.viewport(0,0,width,height);
+  gl.uniform2f(sceneU.resolution,width,height);gl.uniform2f(sceneU.cycle,c,s);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  gl.useProgram(bloomProgram);
+  gl.activeTexture(gl.TEXTURE0);
+  let previous=sceneTarget;
+  for(let i=0;i<bloomTargets.length;i++){
+    const target=bloomTargets[i];
+    gl.bindFramebuffer(gl.FRAMEBUFFER,target.fbo);gl.viewport(0,0,target.w,target.h);
+    gl.bindTexture(gl.TEXTURE_2D,previous.tex);
+    gl.uniform2f(bloomU.texel,1/previous.w,1/previous.h);gl.uniform1f(bloomU.first,i===0?1:0);
+    gl.drawArrays(gl.TRIANGLES,0,3);previous=target;
+  }
+  gl.useProgram(finalProgram);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,width,height);
+  gl.uniform2f(finalU.resolution,width,height);gl.uniform2f(finalU.cycle,c,s);
+  [sceneTarget,...bloomTargets].forEach((target,i)=>{
+    gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,target.tex);
+  });
+  gl.drawArrays(gl.TRIANGLES,0,3);
+}
+function frame(timestamp) {
+  rafId=0;
+  draw(frozenPhase===null?(timestamp/1000%LOOP)/LOOP:frozenPhase);
+  if(frozenPhase===null&&!document.hidden)rafId=requestAnimationFrame(frame);
+}
+function requestFrame(){if(!rafId&&!gl.isContextLost())rafId=requestAnimationFrame(frame);}
+addEventListener('resize',requestFrame,{passive:true});
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){cancelAnimationFrame(rafId);rafId=0;}else requestFrame();
+});
+canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();cancelAnimationFrame(rafId);rafId=0;});
+canvas.addEventListener('webglcontextrestored',()=>location.reload());
+requestFrame();
+})();
+</script>
+</body>
+</html>

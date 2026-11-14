@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Best Animation Trick — Phase-Locked Parallax</title>
+<style>
+  :root {
+    color-scheme: dark;
+    background: #050608;
+    --ember: #ff7a32;
+    --ember-soft: #ffb06d;
+    --ink: #08090d;
+    --muted: rgba(232, 224, 216, .58);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: #050608;
+  }
+  body {
+    position: fixed;
+    inset: 0;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #stage {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    isolation: isolate;
+    background: #050608;
+  }
+  #scene {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  #hud {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    padding: clamp(18px, 3.3vw, 48px);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .topline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+  }
+  .eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: rgba(255, 220, 192, .88);
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 22px;
+    height: 1px;
+    background: var(--ember);
+    box-shadow: 0 0 12px rgba(255, 122, 50, .9);
+  }
+  .loop-label {
+    color: rgba(235, 224, 215, .48);
+    font-size: 9px;
+    letter-spacing: .17em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .center-copy {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: min(80%, 620px);
+    transform: translate(-50%, -50%);
+    text-align: center;
+    margin-top: min(22vh, 145px);
+  }
+  .center-copy strong {
+    display: block;
+    color: rgba(255, 242, 229, .88);
+    font-size: clamp(11px, 1.4vw, 17px);
+    font-weight: 650;
+    letter-spacing: .34em;
+    text-transform: uppercase;
+    text-shadow: 0 0 22px rgba(255, 130, 62, .22);
+  }
+  .center-copy span {
+    display: block;
+    margin-top: 11px;
+    color: rgba(224, 216, 210, .48);
+    font-size: 9px;
+    letter-spacing: .19em;
+    text-transform: uppercase;
+  }
+  .depth-key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+    align-items: center;
+  }
+  .depth-key span {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 30px;
+    padding: 0 11px;
+    border: 1px solid rgba(255, 218, 192, .12);
+    border-radius: 999px;
+    background: rgba(8, 9, 13, .42);
+    color: rgba(235, 224, 215, .58);
+    font-size: 9px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    backdrop-filter: blur(8px);
+  }
+  .depth-key i {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ember);
+    box-shadow: 0 0 9px var(--ember);
+  }
+  .depth-key span:nth-child(2) i { background: #e7a16f; box-shadow: 0 0 9px #e7a16f; }
+  .depth-key span:nth-child(3) i { background: #fff0df; box-shadow: 0 0 9px #fff0df; }
+  .signature {
+    color: rgba(235, 224, 215, .32);
+    font-size: 9px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .bottomline {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 18px;
+  }
+  .note {
+    max-width: 330px;
+    color: rgba(235, 224, 215, .42);
+    font-size: 10px;
+    line-height: 1.55;
+    letter-spacing: .035em;
+  }
+  .note b {
+    color: rgba(255, 190, 145, .8);
+    font-weight: 650;
+  }
+  .transparent #stage { background: transparent; }
+  .transparent, .transparent body { background: transparent; }
+  @media (max-width: 650px) {
+    #hud { padding: 18px; }
+    .loop-label { font-size: 8px; }
+    .center-copy { margin-top: 23vh; }
+    .center-copy strong { letter-spacing: .2em; }
+    .bottomline { align-items: start; flex-direction: column; }
+    .signature { display: none; }
+    .depth-key { gap: 6px; }
+    .depth-key span { min-height: 27px; padding: 0 8px; font-size: 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .center-copy strong { text-shadow: none; }
+  }
+</style>
+<link rel="icon" href="data:,"></head>
+<body>
+<div id="stage">
+  <canvas id="scene" aria-label="A looping demonstration of phase-locked parallax animation"></canvas>
+  <div id="hud" aria-hidden="true">
+    <div class="topline">
+      <div class="eyebrow">The premium loop technique</div>
+      <div class="loop-label">24-second seamless cycle</div>
+    </div>
+    <div class="center-copy">
+      <strong>Phase-locked parallax</strong>
+      <span>One world · three depth planes · continuous motion</span>
+    </div>
+    <div class="bottomline">
+      <div class="depth-key">
+        <span><i></i> Far · slow drift</span>
+        <span><i></i> Mid · orbit</span>
+        <span><i></i> Near · fast pass</span>
+      </div>
+      <div class="signature">Motion without a visible reset</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  /*
+   * BEST TRICK DEMO — PHASE-LOCKED PARALLAX
+   * One 24-second loop, driven by normalized phase.
+   *
+   * The premium effect comes from three depth planes moving at
+   * different speeds, plus a restrained camera drift. Every
+   * movement is periodic, so the first and last frames match.
+   *
+   * URL:
+   *   ?seed=73421          Deterministic scene seed
+   *   ?ratio=9x16          Portrait framing (default 16:9/full viewport)
+   *   ?transparent=1       Transparent canvas background
+   *   ?calm=1              Freeze motion
+   *   ?capture=1&t=4.5      Render one exact frame at 4.5 seconds
+   *
+   * Capture API:
+   *   window.LOOP === 24
+   *   window.renderFrame(t)
+   *   window.step(dt)
+   *   window.render()
+   *
+   * CHANGELOG
+   * v1: Procedural Canvas2D parallax demo with deterministic
+   *     far/mid/near motion, 24s phase loop, capture API,
+   *     reduced-motion support, visibility pause, DPR scaling,
+   *     and EMA quality adaptation.
+   */
+
+  const TAU = Math.PI * 2;
+  const LOOP_SECONDS = 24;
+  const params = new URLSearchParams(location.search);
+  const captureMode = params.has('capture') && params.get('capture') !== '0';
+  const transparent = params.has('transparent') && params.get('transparent') !== '0';
+  const calmParam = params.has('calm') && params.get('calm') !== '0';
+  const portrait = params.get('ratio') === '9x16';
+  const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const calmMode = calmParam || motionQuery.matches;
+
+  function hashSeed(value) {
+    const str = String(value);
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  const seedValue = params.has('seed') ? params.get('seed') : '73421';
+  const baseSeed = hashSeed(seedValue);
+
+  function mulberry32(seed) {
+    let state = seed >>> 0;
+    return function randomSeeded() {
+      state += 0x6D2B79F5;
+      let t = state;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function stream(salt) {
+    return mulberry32((baseSeed ^ salt) >>> 0);
+  }
+
+  const farRng = stream(0x14A2);
+  const midRng = stream(0x29B4);
+  const nearRng = stream(0x3CE6);
+  const rayRng = stream(0x4DF8);
+
+  const canvas = document.getElementById('scene');
+  let ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+  const stage = document.getElementById('stage');
+
+  let W = 1, H = 1, dpr = 1, quality = 2;
+  let pixelScale = 1;
+  let rafId = 0;
+  let lastNow = 0;
+  let sceneTime = 0;
+  let frameEMA = 16.7;
+  let slowFor = 0;
+  let fastFor = 0;
+  let qualityCooldown = 0;
+  let running = false;
+  let contextLost = false;
+
+  const FAR_COUNT = 150;
+  const MID_COUNT = 62;
+  const NEAR_COUNT = 34;
+  const RAY_COUNT = 92;
+
+  const farStars = Array.from({ length: FAR_COUNT }, () => ({
+    x: farRng(), y: farRng(), r: 0.35 + farRng() * 1.35,
+    phase: farRng() * TAU, amp: 0.002 + farRng() * 0.009,
+    twinkle: 0.45 + farRng() * 0.55
+  }));
+
+  const midMotes = Array.from({ length: MID_COUNT }, () => ({
+    angle: midRng() * TAU, radius: 0.25 + midRng() * 0.34,
+    phase: midRng() * TAU, size: 0.8 + midRng() * 2.0,
+    speed: midRng() < 0.5 ? 1 : -1, alpha: 0.2 + midRng() * 0.55
+  }));
+
+  const nearEmbers = Array.from({ length: NEAR_COUNT }, () => ({
+    x: nearRng(), y: nearRng(), phase: nearRng() * TAU,
+    ampX: 0.012 + nearRng() * 0.035,
+    ampY: 0.012 + nearRng() * 0.04,
+    size: 0.8 + nearRng() * 2.5,
+    speed: nearRng() < 0.5 ? 1 : -1,
+    length: 7 + nearRng() * 25,
+    alpha: 0.22 + nearRng() * 0.6
+  }));
+
+  const rays = Array.from({ length: RAY_COUNT }, () => ({
+    angle: rayRng() * TAU,
+    length: 0.025 + rayRng() * 0.09,
+    width: 0.45 + rayRng() * 1.25,
+    phase: rayRng() * TAU,
+    pulse: 0.45 + rayRng() * 0.55
+  }));
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const fract = v => v - Math.floor(v);
+  const smooth = (a, b, x) => {
+    const q = clamp((x - a) / (b - a), 0, 1);
+    return q * q * (3 - 2 * q);
+  };
+
+  function phaseAt(t) {
+    return fract(Math.max(0, t) / LOOP_SECONDS);
+  }
+
+  function resize() {
+    const rect = stage.getBoundingClientRect();
+    W = Math.max(1, rect.width);
+    H = Math.max(1, rect.height);
+    const cap = W < 720 || H < 600 ? 1.25 : 1.5;
+    const requested = Math.min(window.devicePixelRatio || 1, cap);
+    const qualityScale = quality === 2 ? 1 : quality === 1 ? 0.86 : 0.72;
+    const budget = W < 720 ? 1900000 : 3000000;
+    const budgetScale = Math.min(1, Math.sqrt(budget / (W * H * requested * requested)));
+    pixelScale = requested * budgetScale * qualityScale;
+    dpr = pixelScale;
+    canvas.width = Math.max(1, Math.round(W * pixelScale));
+    canvas.height = Math.max(1, Math.round(H * pixelScale));
+    if (ctx) ctx.setTransform(pixelScale, 0, 0, pixelScale, 0, 0);
+  }
+
+  function drawBackground() {
+    if (transparent) {
+      ctx.clearRect(0, 0, W, H);
+      return;
+    }
+    const bg = ctx.createRadialGradient(W * 0.5, H * 0.48, 0, W * 0.5, H * 0.48, Math.max(W, H) * 0.72);
+    bg.addColorStop(0, '#171014');
+    bg.addColorStop(0.42, '#0b0c11');
+    bg.addColorStop(1, '#030406');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function drawFarPlane(p, camX, camY, countScale) {
+    const count = Math.floor(FAR_COUNT * countScale);
+    ctx.save();
+    for (let i = 0; i < count; i++) {
+      const s = farStars[i];
+      const a = TAU * p + s.phase;
+      const x = fract(s.x + Math.sin(a) * s.amp + camX / W * 0.22) * W;
+      const y = fract(s.y + Math.cos(a * 2) * s.amp * 0.65 + camY / H * 0.22) * H;
+      const tw = 0.55 + 0.45 * Math.sin(TAU * p * 2 + s.phase);
+      ctx.globalAlpha = s.twinkle * tw * 0.52;
+      ctx.fillStyle = i % 9 === 0 ? '#ffc18f' : '#c9c5c1';
+      ctx.beginPath();
+      ctx.arc(x, y, s.r, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawAtmosphere(p) {
+    const cx = W * 0.5, cy = H * 0.49;
+    const radius = Math.min(W, H) * 0.43;
+    const haze = ctx.createRadialGradient(cx, cy, radius * 0.04, cx, cy, radius * 1.5);
+    haze.addColorStop(0, 'rgba(255,112,49,0.11)');
+    haze.addColorStop(0.42, 'rgba(165,73,48,0.055)');
+    haze.addColorStop(1, 'rgba(5,6,9,0)');
+    ctx.fillStyle = haze;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(1, H / W);
+    for (let i = 0; i < 5; i++) {
+      const r = radius * (0.74 + i * 0.12);
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, TAU);
+      ctx.strokeStyle = `rgba(255,177,128,${0.025 + i * 0.006})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawMidPlane(p, camX, camY, countScale) {
+    const cx = W * 0.5 + camX * 0.55;
+    const cy = H * 0.49 + camY * 0.55;
+    const m = Math.min(W, H);
+    const radius = m * 0.255;
+    const count = Math.floor(MID_COUNT * countScale);
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(1, 0.73);
+
+    // Two counter-rotating orbit bands create the middle depth plane.
+    for (let band = 0; band < 3; band++) {
+      const r = radius * (0.72 + band * 0.19);
+      const rotation = TAU * p * (band % 2 ? -1 : 1) * (0.5 + band * 0.16);
+      ctx.save();
+      ctx.rotate(rotation);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r * (1.0 + band * 0.08), r * (0.84 + band * 0.05), 0, 0, TAU);
+      ctx.strokeStyle = band === 1 ? 'rgba(255,153,93,0.32)' : 'rgba(228,184,151,0.14)';
+      ctx.lineWidth = band === 1 ? 1.8 : 1;
+      ctx.shadowColor = '#ff8745';
+      ctx.shadowBlur = band === 1 ? 12 : 5;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < count; i++) {
+      const mote = midMotes[i];
+      const angle = mote.angle + TAU * p * 0.72 * mote.speed + Math.sin(TAU * p + mote.phase) * 0.045;
+      const r = radius * mote.radius;
+      const x = Math.cos(angle) * r;
+      const y = Math.sin(angle) * r;
+      const pulse = 0.72 + 0.28 * Math.sin(TAU * p * 2 + mote.phase);
+      ctx.globalAlpha = mote.alpha * pulse;
+      ctx.fillStyle = i % 5 === 0 ? '#ffd0a9' : '#e58a55';
+      ctx.shadowColor = '#ff8c4b';
+      ctx.shadowBlur = 9;
+      ctx.beginPath();
+      ctx.arc(x, y, mote.size, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawCore(p, camX, camY) {
+    const cx = W * 0.5 + camX;
+    const cy = H * 0.49 + camY;
+    const m = Math.min(W, H);
+    const base = m * 0.105;
+    const pulse = 1 + 0.026 * Math.sin(TAU * p * 2) + 0.012 * Math.sin(TAU * p * 4 + 0.6);
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.globalCompositeOperation = 'lighter';
+
+    const glow = ctx.createRadialGradient(0, 0, base * 0.12, 0, 0, base * 3.5);
+    glow.addColorStop(0, 'rgba(255,177,118,0.24)');
+    glow.addColorStop(0.3, 'rgba(255,107,49,0.13)');
+    glow.addColorStop(1, 'rgba(255,87,39,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, base * 3.5, 0, TAU);
+    ctx.fill();
+
+    ctx.save();
+    ctx.scale(1, 0.78);
+    for (let i = 0; i < 4; i++) {
+      const r = base * (1.15 + i * 0.25) * pulse;
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, TAU);
+      ctx.strokeStyle = i === 0 ? 'rgba(255,196,151,0.92)' : `rgba(255,135,77,${0.42 - i * 0.07})`;
+      ctx.lineWidth = i === 0 ? 2.2 : 1.15;
+      ctx.shadowColor = '#ff8c4a';
+      ctx.shadowBlur = 14 - i * 2;
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Radial filaments are static in placement and pulse in brightness.
+    const rayCount = quality === 0 ? 48 : RAY_COUNT;
+    for (let i = 0; i < rayCount; i++) {
+      const ray = rays[i];
+      const angle = ray.angle + TAU * p * 0.08;
+      const inner = base * 1.45;
+      const breathing = 0.76 + 0.24 * Math.sin(TAU * p * 2 + ray.phase);
+      const outer = inner + m * ray.length * breathing;
+      ctx.globalAlpha = ray.pulse * (0.24 + 0.24 * breathing);
+      ctx.strokeStyle = i % 7 === 0 ? '#ffc28f' : '#e7834d';
+      ctx.lineWidth = ray.width;
+      ctx.shadowColor = '#ff8b4d';
+      ctx.shadowBlur = 7;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+      ctx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
+      ctx.stroke();
+    }
+
+    // A small bright nucleus gives the eye a stable focal point.
+    const nucleus = ctx.createRadialGradient(0, 0, 0, 0, 0, base * 0.55);
+    nucleus.addColorStop(0, 'rgba(255,240,221,0.94)');
+    nucleus.addColorStop(0.22, 'rgba(255,172,112,0.7)');
+    nucleus.addColorStop(1, 'rgba(255,111,53,0)');
+    ctx.fillStyle = nucleus;
+    ctx.beginPath();
+    ctx.arc(0, 0, base * 0.55, 0, TAU);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawNearPlane(p, camX, camY, countScale) {
+    const count = Math.floor(NEAR_COUNT * countScale);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < count; i++) {
+      const e = nearEmbers[i];
+      const angle = TAU * p * e.speed + e.phase;
+      const x = fract(e.x + Math.sin(angle) * e.ampX + camX / W * 1.25) * W;
+      const y = fract(e.y + Math.cos(angle * 1.35) * e.ampY + camY / H * 1.25) * H;
+      const dx = Math.cos(angle) * e.length;
+      const dy = -Math.sin(angle * 1.35) * e.length;
+      const flicker = 0.62 + 0.38 * Math.sin(TAU * p * 3 + e.phase);
+      ctx.globalAlpha = e.alpha * flicker;
+      ctx.strokeStyle = i % 4 === 0 ? '#ffd0a8' : '#ff8a4a';
+      ctx.lineWidth = e.size;
+      ctx.shadowColor = '#ff7136';
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.moveTo(x - dx, y - dy);
+      ctx.lineTo(x + dx * 0.22, y + dy * 0.22);
+      ctx.stroke();
+      ctx.fillStyle = '#ffe1c5';
+      ctx.beginPath();
+      ctx.arc(x, y, e.size * 0.75, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawVignette() {
+    if (transparent) return;
+    const g = ctx.createRadialGradient(W * 0.5, H * 0.48, Math.min(W, H) * 0.2, W * 0.5, H * 0.48, Math.max(W, H) * 0.72);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.72, 'rgba(0,0,0,0.08)');
+    g.addColorStop(1, 'rgba(0,0,0,0.58)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function draw(t) {
+    if (!ctx || contextLost) return;
+    const p = phaseAt(t);
+    const countScale = quality === 2 ? 1 : quality === 1 ? 0.72 : 0.46;
+    const camX = Math.sin(TAU * p) * W * 0.008;
+    const camY = Math.sin(TAU * p * 2 + 0.4) * H * 0.006;
+
+    drawBackground();
+    drawAtmosphere(p);
+    drawFarPlane(p, camX, camY, countScale);
+    drawMidPlane(p, camX, camY, countScale);
+    drawCore(p, camX, camY);
+    drawNearPlane(p, camX, camY, countScale);
+    drawVignette();
+  }
+
+  function changeQuality(next) {
+    const value = clamp(next, 0, 2);
+    if (value === quality) return;
+    quality = value;
+    resize();
+  }
+
+  function monitorPerformance(frameMs, dtMs) {
+    frameEMA += 0.1 * (frameMs - frameEMA);
+    qualityCooldown = Math.max(0, qualityCooldown - dtMs);
+
+    if (frameEMA > 24) {
+      slowFor += dtMs;
+      fastFor = 0;
+    } else if (frameEMA < 17) {
+      fastFor += dtMs;
+      slowFor = 0;
+    } else {
+      slowFor = Math.max(0, slowFor - dtMs * 0.5);
+      fastFor = 0;
+    }
+
+    if (slowFor >= 1500 && qualityCooldown <= 0 && quality > 0) {
+      changeQuality(quality - 1);
+      qualityCooldown = 6000;
+      slowFor = 0;
+      fastFor = 0;
+    } else if (fastFor >= 5000 && qualityCooldown <= 0 && quality < 2) {
+      changeQuality(quality + 1);
+      qualityCooldown = 6000;
+      slowFor = 0;
+      fastFor = 0;
+    }
+  }
+
+  function render() {
+    draw(sceneTime);
+  }
+
+  function step(dt) {
+    const safeDt = clamp(Number(dt) || 0, 0, 0.05);
+    if (!calmMode) sceneTime += safeDt;
+    render();
+  }
+
+  function renderFrame(t) {
+    sceneTime = Math.max(0, Number(t) || 0);
+    render();
+  }
+
+  window.LOOP = LOOP_SECONDS;
+  window.renderFrame = renderFrame;
+  window.step = step;
+  window.render = render;
+
+  function frame(now) {
+    if (!running || document.hidden || contextLost) return;
+    if (!lastNow) lastNow = now;
+    const rawMs = Math.max(0, now - lastNow);
+    const dtMs = Math.min(50, rawMs);
+    lastNow = now;
+
+    if (!calmMode) sceneTime += dtMs / 1000;
+    monitorPerformance(rawMs || 16.7, dtMs);
+    render();
+
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function start() {
+    if (captureMode || calmMode || running || document.hidden || contextLost) return;
+    running = true;
+    lastNow = 0;
+    rafId = requestAnimationFrame(frame);
+  }
+
+  function stop() {
+    running = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
+    lastNow = 0;
+  }
+
+  if (portrait) {
+    stage.style.inset = '50% auto auto 50%';
+    stage.style.width = 'min(100vw, 56.25vh)';
+    stage.style.height = 'min(100vh, 177.7778vw)';
+    stage.style.transform = 'translate(-50%, -50%)';
+    document.documentElement.style.background = transparent ? 'transparent' : '#050608';
+    document.body.style.background = transparent ? 'transparent' : '#050608';
+  }
+  if (transparent) {
+    document.documentElement.classList.add('transparent');
+    document.body.style.background = 'transparent';
+    stage.style.background = 'transparent';
+  }
+
+  const resizeObserver = new ResizeObserver(resize);
+  resizeObserver.observe(stage);
+  window.addEventListener('resize', resize, { passive: true });
+
+  canvas.addEventListener('contextlost', event => {
+    if (event && event.preventDefault) event.preventDefault();
+    contextLost = true;
+    stop();
+  });
+  canvas.addEventListener('contextrestored', () => {
+    ctx = canvas.getContext('2d', { alpha: true, desynchronized: true });
+    contextLost = false;
+    resize();
+    render();
+    start();
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stop();
+    } else {
+      lastNow = 0;
+      if (!captureMode && !calmMode) start();
+      else render();
+    }
+  });
+
+  resize();
+
+  if (captureMode) {
+    const requestedTime = Number(params.get('t'));
+    renderFrame(Number.isFinite(requestedTime) ? requestedTime : 0);
+  } else {
+    renderFrame(0);
+    start();
+  }
+
+  if (calmMode && !captureMode) renderFrame(0);
+})();
+</script>
+</body>
+</html>

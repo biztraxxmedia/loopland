@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Obsidian Clockwork</title>
+<style>
+  :root { color-scheme: dark; background: #050506; }
+  * { box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #050506; }
+  body { position: fixed; inset: 0; }
+  canvas { display: block; width: 100vw; height: 100vh; background: #050506; }
+  #fatal { display: none; position: fixed; inset: 0; padding: 24px; align-content: center; justify-content: center; color: #f0dfb2; background: #080708; font: 14px/1.5 monospace; white-space: pre-wrap; }
+</style>
+<link rel="icon" href="data:,"></head>
+<body>
+<canvas id="view" aria-label="Obsidian clockwork generative animation"></canvas>
+<div id="fatal"></div>
+<script>
+(() => {
+  'use strict';
+
+  // PERIOD_MS=10000 — all motion is derived from this exact loop phase.
+  const PERIOD_MS = 10000;
+  const DUST_COUNT = 20;
+  const GRAIN_SIZE = 128;
+  const canvas = document.getElementById('view');
+  const fatal = document.getElementById('fatal');
+  const gl = canvas.getContext('webgl2', {
+    alpha: false,
+    antialias: true,
+    depth: false,
+    stencil: false,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: false
+  });
+
+  function fail(message) {
+    console.error('[Obsidian Clockwork]', message);
+    fatal.textContent = 'WebGL build failed. Details are in the browser console.\n\n' + String(message);
+    fatal.style.display = 'grid';
+  }
+
+  if (!gl) {
+    fail('WebGL 2 is unavailable in this browser or graphics context.');
+    return;
+  }
+
+  const vertexSource = `#version 300 es
+precision highp float;
+void main() {
+  vec2 kPoint = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(kPoint * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+  const fragmentSource = `#version 300 es
+precision highp float;
+precision highp int;
+
+out vec4 kFragColor;
+uniform vec2 uResolution;
+uniform float uAspect;
+uniform float uPhase;
+uniform vec4 uDust[20];
+uniform sampler2D uGrainTex;
+
+const float K_PI = 3.14159265358979323846;
+const float K_TAU = 6.28318530717958647692;
+
+float kSdRoundExtrude(float kD2, float kZ, float kHalfDepth, float kBevel) {
+  vec2 kQ = vec2(kD2, abs(kZ) - kHalfDepth + kBevel);
+  return min(max(kQ.x, kQ.y), 0.0) + length(max(kQ, 0.0)) - kBevel;
+}
+
+float kSdTorus(vec3 kP, float kRadius, float kTube) {
+  vec2 kQ = vec2(length(kP.xy) - kRadius, kP.z);
+  return length(kQ) - kTube;
+}
+
+float kPortraitWeight() {
+  return 1.0 - smoothstep(0.80, 1.65, uAspect);
+}
+
+float kLayoutAngle() {
+  return kPortraitWeight() * (0.5 * K_PI);
+}
+
+vec2 kSecondaryCenter() {
+  float kTheta = kLayoutAngle();
+  return 1.5 * vec2(-cos(kTheta), sin(kTheta));
+}
+
+float kHalfHeight() {
+  float kTheta = kLayoutAngle();
+  return max(1.10, 1.50 * abs(sin(kTheta)) + 0.62);
+}
+
+void kGearInfo(float kId, out vec2 kCenter, out float kRadius, out float kThick,
+               out float kTeeth, out float kRotation, out float kToothOffset) {
+  vec2 kSide = kSecondaryCenter();
+  float kTheta = kLayoutAngle();
+  if (kId < 1.5) {
+    kCenter = vec2(0.0);
+    kRadius = 1.0;
+    kThick = 0.115;
+    kTeeth = 24.0;
+    kRotation = uPhase;
+    kToothOffset = 0.0;
+  } else {
+    kCenter = (kId < 2.5) ? kSide : -kSide;
+    kRadius = 0.5;
+    kThick = 0.095;
+    kTeeth = 12.0;
+    kRotation = -2.0 * uPhase;
+    // Keeps the tooth/gap relationship correct as the layout rotates for portrait framing.
+    kToothOffset = K_PI + 36.0 * kTheta;
+  }
+}
+
+vec2 kGearDistance(vec3 kP, vec2 kCenter, float kRadius, float kThick,
+                   float kTeeth, float kRotation, float kToothOffset, float kId) {
+  vec2 kDelta = kP.xy - kCenter;
+  float kC = cos(kRotation);
+  float kS = sin(kRotation);
+  vec2 kLocal = vec2(kC * kDelta.x + kS * kDelta.y,
+                     -kS * kDelta.x + kC * kDelta.y);
+  float kAngle = atan(kLocal.y, kLocal.x);
+  float kTooth = smoothstep(-0.30, 0.28, cos(kTeeth * kAngle + kToothOffset));
+  float kEdge = kRadius - 0.065 + 0.130 * kTooth;
+  float kBody = kSdRoundExtrude(length(kLocal) - kEdge, kP.z, kThick, 0.018);
+
+  // Raised central boss and two machined concentric rims are united with the gear body.
+  float kHub = kSdRoundExtrude(length(kLocal) - kRadius * 0.245,
+                               kP.z - (kThick + 0.025), 0.050, 0.012);
+  float kOuterRim = kSdTorus(vec3(kLocal, kP.z - (kThick + 0.003)), kRadius * 0.720, 0.014);
+  float kInnerRim = kSdTorus(vec3(kLocal, kP.z - (kThick + 0.003)), kRadius * 0.425, 0.010);
+  float kDistance = min(min(kBody, kHub), min(kOuterRim, kInnerRim));
+  return vec2(kDistance, kId);
+}
+
+vec2 kMapScene(vec3 kP) {
+  float kFloorY = -kHalfHeight() - 0.35;
+  float kFloorD = kP.y - kFloorY;
+  // The floor is safely below the gear cluster; return it directly near its surface.
+  if (kFloorD < 0.12) return vec2(kFloorD, 6.0);
+  // Conservative bound around every gear layout; it accelerates empty-space marching.
+  float kBoundD = length(kP) - 2.15;
+  if (kBoundD > 0.12 && kBoundD < kFloorD) return vec2(kBoundD, 0.0);
+
+  vec2 kBest = vec2(1000.0, 0.0);
+  vec2 kCenter;
+  float kRadius;
+  float kThick;
+  float kTeeth;
+  float kRotation;
+  float kToothOffset;
+
+  kGearInfo(1.0, kCenter, kRadius, kThick, kTeeth, kRotation, kToothOffset);
+  vec2 kG0 = kGearDistance(kP, kCenter, kRadius, kThick, kTeeth, kRotation, kToothOffset, 1.0);
+  if (kG0.x < kBest.x) kBest = kG0;
+
+  kGearInfo(2.0, kCenter, kRadius, kThick, kTeeth, kRotation, kToothOffset);
+  vec2 kG1 = kGearDistance(kP, kCenter, kRadius, kThick, kTeeth, kRotation, kToothOffset, 2.0);
+  if (kG1.x < kBest.x) kBest = kG1;
+
+  kGearInfo(3.0, kCenter, kRadius, kThick, kTeeth, kRotation, kToothOffset);
+  vec2 kG2 = kGearDistance(kP, kCenter, kRadius, kThick, kTeeth, kRotation, kToothOffset, 3.0);
+  if (kG2.x < kBest.x) kBest = kG2;
+
+  if (kFloorD < kBest.x) kBest = vec2(kFloorD, 6.0);
+  return kBest;
+}
+
+vec3 kNormal(vec3 kP) {
+  const float kE = 0.0017;
+  vec3 kA = vec3(1.0, -1.0, -1.0);
+  vec3 kB = vec3(-1.0, -1.0, 1.0);
+  vec3 kC = vec3(-1.0, 1.0, -1.0);
+  vec3 kD = vec3(1.0, 1.0, 1.0);
+  return normalize(
+    kA * kMapScene(kP + kA * kE).x +
+    kB * kMapScene(kP + kB * kE).x +
+    kC * kMapScene(kP + kC * kE).x +
+    kD * kMapScene(kP + kD * kE).x
+  );
+}
+
+float kAmbientOcclusion(vec3 kP, vec3 kN) {
+  float kOcc = 0.0;
+  float kWeight = 1.0;
+  for (int kI = 0; kI < 4; ++kI) {
+    float kH = 0.035 + 0.055 * float(kI);
+    float kD = kMapScene(kP + kN * kH).x;
+    kOcc += max(kH - kD, 0.0) * kWeight;
+    kWeight *= 0.62;
+  }
+  return clamp(1.0 - 1.75 * kOcc, 0.48, 1.0);
+}
+
+float kSoftShadow(vec3 kOrigin, vec3 kDirection) {
+  float kResult = 1.0;
+  float kTravel = 0.025;
+  for (int kI = 0; kI < 18; ++kI) {
+    float kH = kMapScene(kOrigin + kDirection * kTravel).x;
+    if (kH < 0.0015) return 0.18;
+    kResult = min(kResult, 10.0 * kH / kTravel);
+    kTravel += clamp(kH, 0.025, 0.30);
+    if (kTravel > 5.5) break;
+  }
+  return clamp(kResult, 0.18, 1.0);
+}
+
+float kAngleDelta(float kA, float kB) {
+  return abs(atan(sin(kA - kB), cos(kA - kB)));
+}
+
+vec3 kEnvironment(vec3 kDir) {
+  float kAng = atan(kDir.z, kDir.x);
+  float kUp = kDir.y;
+  vec3 kColor = kUp > 0.0
+    ? mix(vec3(0.010, 0.011, 0.016), vec3(0.060, 0.052, 0.043), pow(max(kUp, 0.0), 0.72))
+    : mix(vec3(0.018, 0.016, 0.014), vec3(0.0025, 0.0030, 0.0040), pow(max(-kUp, 0.0), 0.42));
+
+  float kHorizon = 1.0 - smoothstep(0.0, 0.012, abs(kUp - 0.065));
+  kColor += vec3(0.62, 0.57, 0.48) * kHorizon * 0.42;
+
+  float kPanelA = exp(-pow(kAngleDelta(kAng, 1.30) / 0.19, 2.0))
+                   * exp(-pow((kUp - 0.015) / 0.18, 2.0));
+  float kBackBox = exp(-pow(kAngleDelta(kAng, -1.56) / 0.34, 2.0))
+                   * exp(-pow((kUp + 0.055) / 0.30, 2.0));
+  float kPanelB = exp(-pow(kAngleDelta(kAng, -0.48) / 0.19, 2.0))
+                   * smoothstep(-0.20, 0.10, kUp) * (1.0 - smoothstep(0.55, 0.88, kUp));
+  float kPanelC = exp(-pow(kAngleDelta(kAng, 2.55) / 0.13, 2.0))
+                   * smoothstep(-0.30, 0.12, kUp) * (1.0 - smoothstep(0.62, 0.86, kUp));
+  float kGoldStrip = exp(-pow(kAngleDelta(kAng, 0.82) / 0.075, 2.0))
+                      * smoothstep(-0.34, 0.08, kUp) * (1.0 - smoothstep(0.66, 0.88, kUp));
+  float kPanelSeams = 1.0 - smoothstep(0.0, 0.010, abs(fract(kAng * 1.2732) - 0.5) - 0.485);
+
+  kColor += vec3(0.94, 0.88, 0.74) * kPanelA * 1.55;
+  kColor += vec3(0.16, 0.135, 0.105) * kBackBox * 0.95;
+  kColor += vec3(0.78, 0.70, 0.56) * kPanelB * 1.10;
+  kColor += vec3(0.95, 0.90, 0.78) * kPanelC * 0.90;
+  kColor += vec3(1.0, 0.67, 0.20) * kGoldStrip * 2.45;
+  kColor += vec3(0.66, 0.49, 0.25) * kPanelSeams
+            * smoothstep(-0.08, 0.32, kUp) * (1.0 - smoothstep(0.58, 0.82, kUp)) * 0.10;
+  kColor += vec3(0.98, 0.86, 0.62) * smoothstep(0.76, 0.985, kUp) * 1.15;
+  kColor += vec3(0.35, 0.23, 0.11) * exp(-abs(kUp + 0.015) * 20.0) * 0.32;
+  return kColor;
+}
+
+vec3 kAces(vec3 kX) {
+  return clamp((kX * (2.51 * kX + 0.03)) / (kX * (2.43 * kX + 0.59) + 0.14), 0.0, 1.0);
+}
+
+vec3 kShade(vec3 kP, vec3 kN, vec3 kRay, float kId) {
+  vec3 kShadeNormal = kN;
+  vec3 kView = normalize(-kRay);
+  vec3 kBase = vec3(0.020, 0.024, 0.030);
+  vec3 kReflectTint = vec3(0.34, 0.39, 0.47);
+  float kMetal = 0.97;
+  float kRough = 0.17;
+  float kFront = 0.0;
+  vec3 kLocal3 = vec3(0.0);
+  float kGearRadius = 1.0;
+  float kGearThick = 0.115;
+  float kGearRotation = uPhase;
+
+  if (kId > 5.5) {
+    kBase = vec3(0.010, 0.011, 0.014);
+    kReflectTint = vec3(0.46, 0.43, 0.37);
+    kMetal = 0.76;
+    kRough = 0.27;
+  } else {
+    vec2 kCenter;
+    float kTeeth;
+    float kToothOffset;
+    kGearInfo(kId, kCenter, kGearRadius, kGearThick, kTeeth, kGearRotation, kToothOffset);
+    vec2 kDelta = kP.xy - kCenter;
+    float kC = cos(kGearRotation);
+    float kS = sin(kGearRotation);
+    vec2 kLocal = vec2(kC * kDelta.x + kS * kDelta.y,
+                       -kS * kDelta.x + kC * kDelta.y);
+    kLocal3 = vec3(kLocal, kP.z);
+    float kRad = length(kLocal);
+    float kAng = atan(kLocal.y, kLocal.x);
+    kFront = smoothstep(kGearThick - 0.018, kGearThick + 0.018, kLocal3.z);
+
+    float kOuterBand = 1.0 - smoothstep(0.010, 0.027, abs(kRad - kGearRadius * 0.720));
+    float kInnerBand = 1.0 - smoothstep(0.008, 0.021, abs(kRad - kGearRadius * 0.425));
+    float kOuterGroove = 1.0 - smoothstep(0.002, 0.008, abs(kRad - kGearRadius * 0.755));
+    float kInnerGroove = 1.0 - smoothstep(0.002, 0.007, abs(kRad - kGearRadius * 0.390));
+
+    float kRepeatedAngle = atan(sin(6.0 * kAng), cos(6.0 * kAng)) / 6.0;
+    float kBoltDistance = length(vec2(kRad - kGearRadius * 0.535,
+                                      kRepeatedAngle * kGearRadius * 0.535));
+    float kBolt = 1.0 - smoothstep(0.014, 0.026, kBoltDistance);
+    float kBoltSlot = kBolt * (1.0 - smoothstep(0.0025, 0.0060,
+                         abs(sin(6.0 * kAng + 0.22)) * min(kBoltDistance * 10.0, 1.0)));
+
+    if (kFront > 0.2 && kRad < kGearRadius * 0.90) {
+      if (kOuterBand > 0.20 || kInnerBand > 0.20) {
+        kBase = vec3(0.30, 0.165, 0.055);
+        kReflectTint = vec3(0.80, 0.52, 0.20);
+        kMetal = 0.99;
+        kRough = 0.19;
+      }
+      if (kRad < kGearRadius * 0.255) {
+        kBase = vec3(0.56, 0.47, 0.32);
+        kReflectTint = vec3(0.88, 0.76, 0.53);
+        kMetal = 0.78;
+        kRough = 0.23;
+      }
+      if (kBolt > 0.20) {
+        kBase = vec3(0.74, 0.43, 0.105);
+        kReflectTint = vec3(1.0, 0.69, 0.25);
+        kMetal = 1.0;
+        kRough = 0.13;
+      }
+      if (kBoltSlot > 0.75) kBase *= 0.28;
+      float kMachining = 0.965 + 0.035 * sin(kRad * 250.0);
+      kBase *= mix(1.0, kMachining, kFront * 0.65);
+      if (kOuterGroove > 0.35 || kInnerGroove > 0.35) kBase *= 0.52;
+    }
+
+    // Fine radial machining slightly perturbs the reflection, not the silhouette.
+    vec2 kRadialWorld = vec2(kC * kLocal.x - kS * kLocal.y,
+                             kS * kLocal.x + kC * kLocal.y) / max(kRad, 0.001);
+    float kMicro = sin(kRad * 175.0) * 0.006 * kFront;
+    kShadeNormal = normalize(kShadeNormal + vec3(kRadialWorld * kMicro, 0.0));
+  }
+
+  vec3 kKeyDir = normalize(vec3(-0.42, 0.78, 0.55));
+  vec3 kGoldDir = normalize(vec3(0.76, 0.26, 0.58));
+  vec3 kBoneDir = normalize(vec3(-0.10, 0.94, 0.31));
+  float kShadow = kSoftShadow(kP + kShadeNormal * 0.012, kKeyDir);
+  float kAO = kAmbientOcclusion(kP, kShadeNormal);
+  float kNKey = max(dot(kShadeNormal, kKeyDir), 0.0);
+  float kNGold = max(dot(kShadeNormal, kGoldDir), 0.0);
+  float kNBone = max(dot(kShadeNormal, kBoneDir), 0.0);
+
+  float kExponent = mix(28.0, 150.0, 1.0 - kRough);
+  float kSpecKey = pow(max(dot(kShadeNormal, normalize(kKeyDir + kView)), 0.0), kExponent);
+  float kSpecGold = pow(max(dot(kShadeNormal, normalize(kGoldDir + kView)), 0.0), mix(36.0, 125.0, 1.0-kRough));
+  float kSpecBone = pow(max(dot(kShadeNormal, normalize(kBoneDir + kView)), 0.0), 54.0);
+  vec3 kRefDir = reflect(kRay, kShadeNormal);
+  vec3 kEnv = kEnvironment(kRefDir);
+  if (kRough > 0.22) {
+    vec3 kBlurDir = normalize(kRefDir + vec3(0.055, 0.028, -0.018));
+    kEnv = mix(kEnv, kEnvironment(kBlurDir), (kRough - 0.22) * 1.9);
+  }
+
+  float kNView = max(dot(kShadeNormal, kView), 0.0);
+  vec3 kF0 = mix(vec3(0.04), kBase, kMetal);
+  vec3 kFresnel = kF0 + (1.0 - kF0) * pow(1.0 - kNView, 5.0);
+  vec3 kColor = kBase * (0.13 + 0.32 * kNKey * kShadow * (1.0 - kMetal));
+  kColor += kEnv * kReflectTint * (0.42 + 0.58 * kFresnel);
+  kColor += vec3(0.95, 0.83, 0.64) * kSpecKey * kShadow * (0.32 + 1.45 * kMetal);
+  kColor += vec3(1.0, 0.60, 0.16) * kSpecGold * (0.16 + 0.95 * kMetal) * (0.45 + 0.55 * kNGold);
+  kColor += vec3(0.92, 0.83, 0.66) * kSpecBone * 0.22 * kNBone;
+  kColor += kBase * kNGold * 0.11 * (1.0 - kMetal);
+  kColor *= kAO;
+  return kColor;
+}
+
+void main() {
+  vec2 kScreen = gl_FragCoord.xy / uResolution * 2.0 - 1.0;
+  vec2 kUv = kScreen;
+  kUv.x *= uAspect;
+
+  float kPortrait = kPortraitWeight();
+  float kTheta = kLayoutAngle();
+  float kHalfW = max(1.10, 1.50 * abs(cos(kTheta)) + 0.62);
+  float kHalfH = kHalfHeight();
+  float kFov = max(kHalfH / (7.0 * 0.57), kHalfW / (7.0 * uAspect * 0.68));
+
+  vec3 kCamera = vec3(0.0, 0.65, 7.0);
+  vec3 kTarget = vec3(0.0, 0.0, 0.0);
+  vec3 kForward = normalize(kTarget - kCamera);
+  vec3 kRight = normalize(cross(kForward, vec3(0.0, 1.0, 0.0)));
+  vec3 kUp = cross(kRight, kForward);
+  vec3 kRay = normalize(kForward + kFov * (kUv.x * kRight + kUv.y * kUp));
+
+  float kTravel = 0.0;
+  float kHitId = 0.0;
+  bool kHit = false;
+  vec3 kHitPoint = vec3(0.0);
+  for (int kI = 0; kI < 76; ++kI) {
+    vec3 kPoint = kCamera + kRay * kTravel;
+    vec2 kStep = kMapScene(kPoint);
+    if (kStep.x < 0.0016) {
+      kHit = true;
+      kHitId = kStep.y;
+      kHitPoint = kPoint;
+      break;
+    }
+    kTravel += max(kStep.x * 0.76, 0.0045);
+    if (kTravel > 18.0) break;
+  }
+
+  vec3 kColor = kEnvironment(kRay);
+  if (kHit) {
+    vec3 kN = kNormal(kHitPoint);
+    kColor = kShade(kHitPoint, kN, kRay, kHitId);
+  }
+
+  // Seeded dust motes travel on closed one-, two-, or three-cycle paths.
+  for (int kI = 0; kI < 20; ++kI) {
+    float kFreq = 1.0 + float(kI % 3);
+    vec2 kDrift = vec2(sin(uPhase * kFreq + uDust[kI].w),
+                       cos(uPhase * kFreq + uDust[kI].w)) * vec2(0.018, 0.024);
+    vec2 kDustPos = uDust[kI].xy + kDrift;
+    vec2 kDustDelta = (kScreen - kDustPos) * vec2(uAspect, 1.0);
+    float kDustD = length(kDustDelta);
+    float kGlow = exp(-kDustD * kDustD / max(uDust[kI].z * uDust[kI].z * 7.0, 0.000001));
+    float kCore = 1.0 - smoothstep(uDust[kI].z * 0.30, uDust[kI].z * 0.78, kDustD);
+    kColor += vec3(1.0, 0.64, 0.20) * (0.009 * kGlow + 0.075 * kCore);
+  }
+
+  float kGrain = texture(uGrainTex, gl_FragCoord.xy / float(128)).r - 0.5;
+  kColor += kGrain * 0.012;
+  kColor = kAces(max(kColor, 0.0));
+  kColor = pow(max(kColor, 0.0), vec3(1.0 / 2.2));
+  float kVignette = 1.0 - smoothstep(0.28, 1.35, length(kScreen));
+  kColor *= mix(0.66, 1.0, kVignette);
+  kFragColor = vec4(kColor, 1.0);
+}`;
+
+  function compileShader(type, source, label) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    const log = gl.getShaderInfoLog(shader) || '';
+    if (log.trim()) console[gl.getShaderParameter(shader, gl.COMPILE_STATUS) ? 'info' : 'error']('[Obsidian Clockwork] ' + label + ' shader log:\n' + log);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      gl.deleteShader(shader);
+      throw new Error(label + ' shader compilation failed:\n' + log);
+    }
+    return shader;
+  }
+
+  let program;
+  try {
+    const vertexShader = compileShader(gl.VERTEX_SHADER, vertexSource, 'Vertex');
+    const fragmentShader = compileShader(gl.FRAGMENT_SHADER, fragmentSource, 'Fragment');
+    program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    const programLog = gl.getProgramInfoLog(program) || '';
+    if (programLog.trim()) console[gl.getProgramParameter(program, gl.LINK_STATUS) ? 'info' : 'error']('[Obsidian Clockwork] Program link log:\n' + programLog);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error('Program link failed:\n' + programLog);
+    }
+    gl.deleteShader(vertexShader);
+    gl.deleteShader(fragmentShader);
+  } catch (error) {
+    fail(error && error.stack ? error.stack : error);
+    return;
+  }
+
+  gl.useProgram(program);
+  gl.bindVertexArray(gl.createVertexArray());
+
+  const kUniforms = {
+    resolution: gl.getUniformLocation(program, 'uResolution'),
+    aspect: gl.getUniformLocation(program, 'uAspect'),
+    phase: gl.getUniformLocation(program, 'uPhase'),
+    dust: gl.getUniformLocation(program, 'uDust[0]'),
+    grain: gl.getUniformLocation(program, 'uGrainTex')
+  };
+
+  // Deterministic one-time PRNG for the grain tile and dust layout; no runtime randomness.
+  function mulberry32(seed) {
+    return function seededRandom() {
+      let kT = seed += 0x6D2B79F5;
+      kT = Math.imul(kT ^ (kT >>> 15), kT | 1);
+      kT ^= kT + Math.imul(kT ^ (kT >>> 7), kT | 61);
+      return ((kT ^ (kT >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const seeded = mulberry32(0xC10C2026);
+  const grainPixels = new Uint8Array(GRAIN_SIZE * GRAIN_SIZE * 4);
+  for (let kI = 0; kI < GRAIN_SIZE * GRAIN_SIZE; ++kI) {
+    const kValue = Math.round(128 + (seeded() - 0.5) * 112);
+    const kOffset = kI * 4;
+    grainPixels[kOffset] = kValue;
+    grainPixels[kOffset + 1] = kValue;
+    grainPixels[kOffset + 2] = kValue;
+    grainPixels[kOffset + 3] = 255;
+  }
+  const grainTexture = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, grainTexture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, GRAIN_SIZE, GRAIN_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, grainPixels);
+  gl.uniform1i(kUniforms.grain, 0);
+
+  const dustData = new Float32Array(DUST_COUNT * 4);
+  for (let kI = 0; kI < DUST_COUNT; ++kI) {
+    const kOffset = kI * 4;
+    dustData[kOffset] = seeded() * 1.82 - 0.91;
+    dustData[kOffset + 1] = seeded() * 1.82 - 0.91;
+    dustData[kOffset + 2] = 0.004 + seeded() * 0.0045;
+    dustData[kOffset + 3] = seeded() * Math.PI * 2.0;
+  }
+  gl.uniform4fv(kUniforms.dust, dustData);
+
+  const queryPhase = new URLSearchParams(window.location.search).get('t');
+  let frozenPhase = null;
+  if (queryPhase !== null && queryPhase.trim() !== '') {
+    const parsedPhase = Number(queryPhase);
+    if (Number.isFinite(parsedPhase)) frozenPhase = ((parsedPhase % 1) + 1) % 1;
+  }
+
+  function resize() {
+    const kWidth = Math.max(1, window.innerWidth);
+    const kHeight = Math.max(1, window.innerHeight);
+    const kDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const kPixelBudgetScale = Math.min(1, Math.sqrt(1500000 / (kWidth * kHeight * kDpr * kDpr)));
+    const kScale = kDpr * kPixelBudgetScale;
+    canvas.width = Math.max(1, Math.round(kWidth * kScale));
+    canvas.height = Math.max(1, Math.round(kHeight * kScale));
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.uniform2f(kUniforms.resolution, canvas.width, canvas.height);
+    gl.uniform1f(kUniforms.aspect, canvas.width / canvas.height);
+  }
+
+  function render(timestamp) {
+    // p is sourced only from the RAF timestamp. ?t=... overrides it for a deterministic still.
+    const p = frozenPhase === null ? ((timestamp / 1000) % (PERIOD_MS / 1000)) / (PERIOD_MS / 1000) : frozenPhase;
+    const A = 2.0 * Math.PI * p;
+    gl.uniform1f(kUniforms.phase, A);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    // Frozen mode redraws the same phase so browser still-frame capture remains stable.
+    requestAnimationFrame(render);
+  }
+
+  resize();
+  window.addEventListener('resize', () => {
+    resize();
+    if (frozenPhase !== null) requestAnimationFrame(render);
+  }, { passive: true });
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riso Orbit</title>
+<style>
+  /* PERIOD_MS=8000 */
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#f3eee2}
+  canvas{display:block;width:100vw;height:100vh}
+</style>
+<link rel="icon" href="data:,"></head>
+<body>
+<canvas id="art"></canvas>
+<script>
+(() => {
+  const PERIOD_MS=8000; // Exact seamless loop period.
+  const canvas=document.getElementById('art'), ctx=canvas.getContext('2d',{alpha:false});
+  let W=0,H=0,D=1;
+  function resize(){D=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;canvas.width=Math.round(W*D);canvas.height=Math.round(H*D);ctx.setTransform(D,0,0,D,0,0);}
+  addEventListener('resize',resize);resize();
+  // Deterministic seeded PRNG: used only to build fixed paper grain.
+  let seed=0x51A07;function rand(){seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;}
+  const grain=Array.from({length:1700},()=>({x:rand(),y:rand(),a:.025+rand()*.055,r:.25+rand()*.65}));
+  function halftone(color,angle,phase,t,kind){
+    const cx=W*.5+Math.cos(t*2*Math.PI+phase)*W*.105;
+    const cy=H*.5+Math.sin(t*2*Math.PI+phase)*H*.105;
+    const scale=Math.min(W,H)*.31;
+    ctx.save();ctx.translate(cx,cy);ctx.rotate(angle+Math.sin(t*2*Math.PI+phase)*.10);
+    ctx.globalCompositeOperation='multiply';ctx.fillStyle=color;
+    const spacing=Math.max(5,Math.min(W,H)/82), radius=spacing*.28;
+    const span=Math.hypot(W,H)*.7;
+    for(let y=-span;y<span;y+=spacing)for(let x=-span;x<span;x+=spacing){
+      // Dot-screen density is modulated by a circle and a triangle mask.
+      const px=x/scale,py=y/scale;
+      const circle=Math.abs(Math.hypot(px+.14,py-.02)-.67);
+      const triX=Math.abs(py*.88+px*.50+.36);
+      const triY=Math.abs(py*.88-px*.50+.36);
+      const insideCircle=circle<.095;
+      const insideTriangle=(py>-.55&&py<.53&&Math.abs(px)<(.62-py*.35));
+      const wave=.5+.5*Math.sin(px*8+py*6+t*2*Math.PI+phase*3);
+      const d=(insideCircle?1:0)+(insideTriangle?.72:0);
+      const rr=radius*(.25+d*.75)*(0.82+wave*.18);
+      if(d>.3){ctx.beginPath();ctx.arc(x,y,rr,0,Math.PI*2);ctx.fill();}
+      else if((Math.floor((x+span)/spacing)+Math.floor((y+span)/spacing))%3===0){
+        // Sparse screen dots retain the printed halftone texture.
+        ctx.beginPath();ctx.arc(x,y,radius*.30,0,Math.PI*2);ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+  function frame(stamp){
+    const phase=((stamp%PERIOD_MS)+PERIOD_MS)%PERIOD_MS/PERIOD_MS;
+    ctx.globalCompositeOperation='source-over';ctx.fillStyle='#F3EEE2';ctx.fillRect(0,0,W,H);
+    for(const g of grain){ctx.fillStyle=`rgba(72,49,30,${g.a})`;ctx.beginPath();ctx.arc(g.x*W,g.y*H,g.r,0,Math.PI*2);ctx.fill();}
+    halftone('#FF48B0',Math.PI/9,0,phase,0);
+    halftone('#00838A',-Math.PI/4,.33,phase,1);
+    halftone('#FFE800',Math.PI/3,.67,phase,2);
+    // Fixed paper flecks, independent of frame timing.
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

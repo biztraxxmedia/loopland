@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Event Horizon Silk · LoopLand 1/1</title>
+<style>
+html,body{margin:0;height:100%;background:#03020a;overflow:hidden}
+canvas{display:block;width:100vw;height:100vh}
+</style>
+<link rel="icon" href="data:,"></head>
+<body>
+<canvas id="c" aria-label="Thousands of silk-like light streams spiralling into a black hole, looping forever"></canvas>
+<script>
+(()=>{
+/* ---------- loop + determinism ---------- */
+const T=10, FPS=60;                 /* 10 s loop, 600 frames */
+const W=1920, H=1080, CX=W/2, CY=H/2;
+const params=new URLSearchParams(location.search);
+const RENDER=params.has('render');
+const EMBED=window.self!==window.top;
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}
+const rnd=mulberry32(0x5EED1A11);
+
+/* ---------- seeded 2D simplex noise ---------- */
+const perm=new Uint8Array(512);{const p=[...Array(256).keys()];for(let i=255;i>0;i--){const j=Math.floor(rnd()*(i+1));[p[i],p[j]]=[p[j],p[i]];}for(let i=0;i<512;i++)perm[i]=p[i&255];}
+const G=[[1,1],[-1,1],[1,-1],[-1,-1],[1,0],[-1,0],[0,1],[0,-1]];
+const F2=.5*(Math.sqrt(3)-1),G2=(3-Math.sqrt(3))/6;
+function noise(x,y){
+  const s=(x+y)*F2,i=Math.floor(x+s),j=Math.floor(y+s),t=(i+j)*G2;
+  const x0=x-(i-t),y0=y-(j-t),i1=x0>y0?1:0,j1=1-i1;
+  const x1=x0-i1+G2,y1=y0-j1+G2,x2=x0-1+2*G2,y2=y0-1+2*G2;
+  const ii=i&255,jj=j&255;let n=0,tt;
+  tt=.5-x0*x0-y0*y0;if(tt>0){const g=G[perm[ii+perm[jj]]&7];tt*=tt;n+=tt*tt*(g[0]*x0+g[1]*y0);}
+  tt=.5-x1*x1-y1*y1;if(tt>0){const g=G[perm[ii+i1+perm[jj+j1]]&7];tt*=tt;n+=tt*tt*(g[0]*x1+g[1]*y1);}
+  tt=.5-x2*x2-y2*y2;if(tt>0){const g=G[perm[ii+1+perm[jj+1]]&7];tt*=tt;n+=tt*tt*(g[0]*x2+g[1]*y2);}
+  return 70*n;
+}
+
+/* ---------- accretion-disk flow field (disk space, centred) ---------- */
+const TILT=.5, ROT=-.13, HORIZON=104;
+const cr=Math.cos(ROT), sr=Math.sin(ROT);
+function field(x,y){
+  const r=Math.hypot(x,y)+1e-6, tx=-y/r, ty=x/r, rx=x/r, ry=y/r;
+  const f=.00155,e=.6;
+  const cx=(noise(x*f,(y+e)*f+9)-noise(x*f,(y-e)*f+9))/(2*e);
+  const cy=-(noise((x+e)*f,y*f+9)-noise((x-e)*f,y*f+9))/(2*e);
+  const cl=Math.hypot(cx,cy)+1e-9;
+  const swirl=Math.pow(520/(r+40),.75);
+  const inflow=-.34-.25*Math.exp(-r/420);
+  const turb=.5*Math.min(1,r/600);
+  let vx=tx*swirl+rx*inflow+cx/cl*turb, vy=ty*swirl+ry*inflow+cy/cl*turb;
+  const m=Math.hypot(vx,vy);return [vx/m,vy/m];
+}
+function proj(x,y){const yy=y*TILT;return [CX+x*cr-yy*sr, CY+x*sr+yy*cr];}
+
+/* palette by radius: white-hot core -> amber -> magenta -> violet -> cyan -> deep blue */
+const STOPS=[[0,[255,246,222]],[150,[255,196,92]],[320,[255,72,128]],[560,[150,84,255]],[820,[40,170,255]],[1150,[20,60,160]]];
+function colAt(r){for(let i=1;i<STOPS.length;i++){if(r<=STOPS[i][0]){const a=STOPS[i-1],b=STOPS[i],t=(r-a[0])/(b[0]-a[0]);return a[1].map((v,k)=>Math.round(v+(b[1][k]-v)*t));}}return STOPS[STOPS.length-1][1];}
+const NBIN=28, BIN_R=1150/NBIN;
+const BIN_COL=[...Array(NBIN)].map((_,i)=>colAt((i+.5)*BIN_R));
+
+/* ---------- precompute streamlines (seeded, so every render is identical) ---------- */
+const STEP=3.1, MAXN=560, NPATH=EMBED?1300:2300, PER=2, TRAIL=44;
+const paths=[];
+let guard=0;
+while(paths.length<NPATH&&guard++<NPATH*6){
+  const a=rnd()*Math.PI*2, r=Math.sqrt(.03+rnd()*.97)*1180;
+  let x=Math.cos(a)*r, y=Math.sin(a)*r;
+  const xs=new Float32Array(MAXN*2), rs=new Float32Array(MAXN);let n=0;
+  for(;n<MAXN;n++){
+    const pr=proj(x,y);xs[2*n]=pr[0];xs[2*n+1]=pr[1];const rr=Math.hypot(x,y);rs[n]=rr;
+    if(rr<HORIZON)break;
+    const v=field(x,y);
+    /* RK2 for silky curves */
+    const v2=field(x+v[0]*STEP*.5,y+v[1]*STEP*.5);
+    x+=v2[0]*STEP;y+=v2[1]*STEP;
+    if(rr>1300)break;
+  }
+  if(n<120)continue;
+  const k=rs[0]<520?(rnd()<.5?2:3):(rnd()<.6?1:2);   /* whole-number laps per loop => perfectly periodic */
+  const off=rnd(), w=.6+rnd()*1.3, bright=.55+rnd()*.45;
+  paths.push({xs,rs,n,k,off,w,bright});
+}
+
+window.__buildMs=performance.now();
+/* ---------- canvas setup ---------- */
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+let dpr=RENDER?1:Math.min(devicePixelRatio||1,EMBED?1.5:2);
+let S=1,OX=0,OY=0;
+const hasFilter='filter' in ctx;
+let glowC=document.createElement('canvas'),gctx=glowC.getContext('2d');
+let staticC=null, grainC=null;
+function resize(){
+  const w=Math.max(2,Math.round(cv.clientWidth*dpr)),h=Math.max(2,Math.round(cv.clientHeight*dpr));
+  if(cv.width===w&&cv.height===h&&staticC)return;
+  cv.width=w;cv.height=h;
+  S=Math.max(w/W,h/H);OX=(w-W*S)/2;OY=(h-H*S)/2;
+  glowC.width=Math.ceil(w/4);glowC.height=Math.ceil(h/4);
+  buildStatic(w,h);
+}
+function buildStatic(w,h){
+  staticC=document.createElement('canvas');staticC.width=w;staticC.height=h;
+  const c=staticC.getContext('2d');
+  const g=c.createRadialGradient(w/2,h/2,0,w/2,h/2,Math.hypot(w,h)/2);
+  g.addColorStop(0,'#0d0820');g.addColorStop(.45,'#070414');g.addColorStop(1,'#020106');
+  c.fillStyle=g;c.fillRect(0,0,w,h);
+  c.setTransform(S,0,0,S,OX,OY);
+  /* faint full streamlines: the silk texture */
+  c.globalCompositeOperation='lighter';
+  const r2=mulberry32(77);
+  for(const P of paths){
+    if(r2()>.55)continue;
+    const col=BIN_COL[Math.min(NBIN-1,Math.floor(P.rs[0]/BIN_R))];
+    c.strokeStyle=`rgba(${col[0]},${col[1]},${col[2]},.045)`;c.lineWidth=.7;
+    c.beginPath();c.moveTo(P.xs[0],P.xs[1]);for(let i=2;i<P.n;i+=2)c.lineTo(P.xs[2*i],P.xs[2*i+1]);c.stroke();
+  }
+  c.setTransform(1,0,0,1,0,0);c.globalCompositeOperation='source-over';
+  grainC=document.createElement('canvas');grainC.width=256;grainC.height=256;
+  const gc=grainC.getContext('2d'),id=gc.createImageData(256,256),r3=mulberry32(9);
+  for(let i=0;i<id.data.length;i+=4){const v=r3()*255;id.data[i]=id.data[i+1]=id.data[i+2]=v;id.data[i+3]=10;}
+  gc.putImageData(id,0,0);
+}
+
+/* stars */
+const stars=[...Array(420)].map(()=>({x:rnd()*W,y:rnd()*H,s:rnd()*1.3+.2,k:1+Math.floor(rnd()*3),ph:rnd(),b:rnd()}));
+
+const TAU=Math.PI*2;
+function frame(p){
+  resize();
+  const w=cv.width,h=cv.height;
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.globalCompositeOperation='source-over';ctx.globalAlpha=1;ctx.filter='none';
+  ctx.drawImage(staticC,0,0);
+  ctx.setTransform(S,0,0,S,OX,OY);
+  ctx.globalCompositeOperation='lighter';
+  for(const st of stars){
+    const tw=.35+.65*(.5+.5*Math.sin(TAU*(p*st.k+st.ph)));
+    ctx.fillStyle=`rgba(200,215,255,${(.15+.55*st.b)*tw})`;ctx.fillRect(st.x,st.y,st.s,st.s);
+  }
+  /* bucket trails by (layer, chunk, colour bin, alpha level) so we stroke a few hundred paths, not thousands */
+  const CH=4, AL=8, buckets=new Map();
+  for(const P of paths){
+    for(let m=0;m<PER;m++){
+      const u=((p*P.k+P.off+m/PER)%1+1)%1;
+      const head=Math.floor(u*(P.n-1));
+      const env=Math.pow(Math.sin(Math.PI*u),.6)*P.bright;    /* fades to 0 at both ends of the stream => seamless wrap */
+      if(env<.02)continue;
+      const hr=P.rs[head];
+      const layer=(P.xs[2*head+1]-CY)<0?0:1;
+      const bin=Math.min(NBIN-1,Math.floor(hr/BIN_R));
+      const near=hr<300?1.35:1;
+      for(let c=0;c<CH;c++){
+        const a0=head-Math.floor(TRAIL*c/CH), a1=head-Math.floor(TRAIL*(c+1)/CH);
+        if(a0<=0)break;
+        const fade=env*(1-c/CH)*near;
+        const al=Math.min(AL-1,Math.floor(fade*AL));
+        if(al<0)continue;
+        const key=((layer*CH+c)*NBIN+bin)*AL+al;
+        let arr=buckets.get(key);if(!arr){arr=[];buckets.set(key,arr);}
+        arr.push(P,Math.max(0,a1),a0);
+      }
+    }
+  }
+  const keys=[...buckets.keys()].sort((a,b)=>a-b);
+  const drawLayer=L=>{
+    for(const key of keys){
+      const al=key%AL, bin=Math.floor(key/AL)%NBIN, c=Math.floor(key/AL/NBIN)%CH, layer=Math.floor(key/AL/NBIN/CH);
+      if(layer!==L)continue;
+      const arr=buckets.get(key), col=BIN_COL[bin];
+      ctx.strokeStyle=`rgba(${col[0]},${col[1]},${col[2]},${((al+.5)/AL*.55).toFixed(3)})`;
+      ctx.lineWidth=(1.9-c*.35)*(bin<6?1.25:1);
+      ctx.beginPath();
+      for(let i=0;i<arr.length;i+=3){
+        const P=arr[i],s=arr[i+1],e=arr[i+2],xs=P.xs;
+        ctx.moveTo(xs[2*s],xs[2*s+1]);
+        for(let j=s+2;j<e;j+=2)ctx.lineTo(xs[2*j],xs[2*j+1]);
+        ctx.lineTo(xs[2*e],xs[2*e+1]);
+      }
+      ctx.stroke();
+    }
+  };
+  ctx.lineCap='round';
+  drawLayer(0);
+  /* the hole: inner glow, black disk, photon ring, lensed back-disk */
+  const pulse=.5+.5*Math.sin(TAU*p*2);
+  ctx.globalCompositeOperation='lighter';
+  let g=ctx.createRadialGradient(CX,CY,HORIZON*.9,CX,CY,HORIZON*3.2);
+  g.addColorStop(0,`rgba(255,200,120,${.38+.12*pulse})`);g.addColorStop(.35,'rgba(255,90,140,.12)');g.addColorStop(1,'rgba(80,40,200,0)');
+  ctx.fillStyle=g;ctx.fillRect(CX-HORIZON*3.3,CY-HORIZON*3.3,HORIZON*6.6,HORIZON*6.6);
+  ctx.globalCompositeOperation='source-over';
+  ctx.save();ctx.translate(CX,CY);ctx.rotate(ROT);
+  /* lensed far side of the disk arcs over the top of the hole */
+  ctx.globalCompositeOperation='lighter';
+  for(let i=0;i<6;i++){
+    ctx.strokeStyle=`rgba(255,${180-i*14},${110+i*10},${(.3-i*.045)*(0.85+.15*pulse)})`;
+    ctx.lineWidth=10-i*1.3;
+    ctx.beginPath();ctx.ellipse(0,-6,HORIZON*1.55+i*7,HORIZON*1.28+i*6,0,Math.PI*1.04,Math.PI*1.96);ctx.stroke();
+    ctx.beginPath();ctx.ellipse(0,6,HORIZON*1.4+i*6,HORIZON*1.08+i*5,0,Math.PI*.08,Math.PI*.92);ctx.globalAlpha=.55;ctx.stroke();ctx.globalAlpha=1;
+  }
+  ctx.globalCompositeOperation='source-over';
+  ctx.fillStyle='#000';ctx.beginPath();ctx.arc(0,0,HORIZON,0,TAU);ctx.fill();
+  ctx.globalCompositeOperation='lighter';
+  for(let i=0;i<5;i++){ctx.strokeStyle=`rgba(255,236,200,${.5-i*.09})`;ctx.lineWidth=1.2+i*2.2;ctx.beginPath();ctx.arc(0,0,HORIZON+1+i*.8,0,TAU);ctx.stroke();}
+  ctx.restore();
+  drawLayer(1);
+  /* bloom */
+  ctx.setTransform(1,0,0,1,0,0);
+  if(hasFilter){
+    gctx.setTransform(1,0,0,1,0,0);gctx.globalCompositeOperation='source-over';
+    gctx.filter='none';gctx.clearRect(0,0,glowC.width,glowC.height);
+    gctx.filter=`blur(${Math.max(2,6*S*dpr/ (dpr||1))}px)`;
+    gctx.drawImage(cv,0,0,glowC.width,glowC.height);gctx.filter='none';
+    ctx.globalCompositeOperation='lighter';ctx.globalAlpha=.75;
+    ctx.drawImage(glowC,0,0,w,h);ctx.globalAlpha=1;
+  }
+  /* vignette + grain */
+  ctx.globalCompositeOperation='source-over';
+  const vg=ctx.createRadialGradient(w/2,h/2,Math.min(w,h)*.35,w/2,h/2,Math.hypot(w,h)*.62);
+  vg.addColorStop(0,'rgba(0,0,0,0)');vg.addColorStop(1,'rgba(0,0,0,.6)');
+  ctx.fillStyle=vg;ctx.fillRect(0,0,w,h);
+  ctx.fillStyle=ctx.createPattern(grainC,'repeat');ctx.fillRect(0,0,w,h);
+}
+
+window.renderFrame=p=>{frame(((p%1)+1)%1);return true;};
+window.LOOP={T,FPS,frames:T*FPS};
+if(RENDER)return;
+const speed=matchMedia('(prefers-reduced-motion: reduce)').matches?.25:1;
+let acc=0,last=0,paused=false;
+addEventListener('message',e=>{if(e.data&&e.data.loopland)paused=e.data.loopland==='pause';});
+addEventListener('resize',()=>{staticC=null;});
+function tick(ts){
+  requestAnimationFrame(tick);
+  if(paused){last=0;return;}
+  const dt=last?Math.min((ts-last)/1000,1/30):0;last=ts;acc+=dt*speed;
+  frame((acc/T)%1);
+}
+requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

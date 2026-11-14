@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Truchet Flip</title>
+<style>/* PERIOD_MS=6000 */
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#F4EBDD}
+canvas{display:block;width:100vw;height:100vh}</style>
+<link rel="icon" href="data:,"></head>
+<body><canvas id="art"></canvas>
+<script>
+(() => {
+  const PERIOD_MS=6000; // Exact seamless loop period.
+  const canvas=document.getElementById('art'),ctx=canvas.getContext('2d',{alpha:false});
+  let W=0,H=0,D=1;
+  function resize(){D=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;canvas.width=Math.round(W*D);canvas.height=Math.round(H*D);ctx.setTransform(D,0,0,D,0,0);}
+  addEventListener('resize',resize);resize();
+  const palette=['#D7263D','#F4B400','#1B3A8C','#151515','#F4EBDD'];
+  // Seeded PRNG fixes each tile's palette and orientation.
+  let seed=0xC0FFEE;function rand(){seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;}
+  const tiles=Array.from({length:24*24},(_,i)=>({color:Math.floor(rand()*4),flip:Math.floor(rand()*2),salt:rand()*Math.PI*2}));
+  function ease(x){return x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2;}
+  function arcTile(x,y,size,tile,row,col,p){
+    const diagonal=(row+col)/2;
+    const wave=((p*2.0-diagonal*.085)%1+1)%1;
+    const eased=ease(wave);
+    const angle=tile.flip*Math.PI/2 + eased*Math.PI/2;
+    ctx.save();ctx.translate(x+size/2,y+size/2);ctx.rotate(angle);
+    const r=size*.47;
+    ctx.strokeStyle=palette[tile.color];ctx.lineWidth=size*.135;ctx.lineCap='butt';
+    ctx.beginPath();ctx.arc(-size/2,-size/2,r,0,Math.PI/2);ctx.stroke();
+    ctx.beginPath();ctx.arc(size/2,size/2,r,Math.PI,Math.PI*1.5);ctx.stroke();
+    // Flat tile field and occasional strong quarter-disc countershape.
+    if((row*7+col*11)%5===0){ctx.fillStyle=palette[(tile.color+1)%4];ctx.beginPath();ctx.moveTo(-size/2,-size/2);ctx.arc(-size/2,-size/2,size*.24,0,Math.PI/2);ctx.closePath();ctx.fill();}
+    ctx.restore();
+  }
+  function frame(stamp){
+    const p=((stamp%PERIOD_MS)+PERIOD_MS)%PERIOD_MS/PERIOD_MS;
+    ctx.fillStyle='#F4EBDD';ctx.fillRect(0,0,W,H);
+    const size=Math.ceil(Math.max(W/13,H/10)/2)*2;
+    const cols=Math.ceil(W/size)+2,rows=Math.ceil(H/size)+2;
+    const ox=(W-cols*size)/2,oy=(H-rows*size)/2;
+    // A full integer-turn phase guarantees exact first/last-frame equality.
+    for(let r=-1;r<rows;r++)for(let c=-1;c<cols;c++){
+      const tile=tiles[((r+24)%24)*24+((c+24)%24)];
+      ctx.fillStyle=palette[4];ctx.fillRect(ox+c*size,oy+r*size,size,size);
+      arcTile(ox+c*size,oy+r*size,size,tile,r,c,p);
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script></body></html>

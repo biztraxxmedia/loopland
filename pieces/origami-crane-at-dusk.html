@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="Origami Crane at Dusk — a ten-second, perfectly periodic, procedural paper sculpture. Offline WebGL2 edition.">
+<title>Origami Crane at Dusk</title>
+<style>
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#05060d}canvas{display:block;width:100vw;height:100vh;width:100dvw;height:100dvh}
+</style>
+</head>
+<body>
+<canvas aria-label="A cream origami crane flies above folded indigo paper clouds, carrying a vermilion seal and a red thread."></canvas>
+<script>
+/*
+ ORIGAMI CRANE AT DUSK
+ A single-file original: physical folded sheets, signed convex plane distances,
+ soft raymarched shadows, two-sided fibrous washi, and a vermilion silk filament.
+ No imports, downloads, network calls, fonts, images, or accumulated animation.
+
+ The sole clock is the requestAnimationFrame timestamp. All articulation and
+ translations are closed trigonometric functions of its ten-second phase.
+ ?t=0.37 freezes the sculpture at 37% of the loop; 0 and 1 are identical.
+ Resize preserves phase. Context restoration regenerates the same seed.
+*/
+(() => {
+'use strict';
+const kCanvas=document.querySelector('canvas');
+const kGl=kCanvas.getContext('webgl2',{alpha:false,antialias:false,depth:false,stencil:false,powerPreference:'high-performance',preserveDrawingBuffer:true});
+if(!kGl){console.error('Origami Crane at Dusk requires WebGL2.');return;}
+const kTAU=2*Math.PI,kL=10,kMaxFaces=128,kMaxGroups=10,kThreadCount=22,kDustCount=42;
+const kQuery=new URLSearchParams(location.search);
+const kFreezeValue=kQuery.has('t')?Number(kQuery.get('t')):NaN;
+const kFrozen=Number.isFinite(kFreezeValue);
+const kFrozenPhase=kFrozen?((kFreezeValue%1)+1)%1:0;
+let kReady=false,kFrameHandle=0;
+
+const kVS=`#version 300 es
+precision highp float;
+out vec2 vUv;
+void main(){vec2 kP=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));vUv=kP;gl_Position=vec4(kP*2.0-1.0,0.0,1.0);}`;
+
+const kFS=`#version 300 es
+precision highp float;
+precision highp int;
+out vec4 fragColor;
+uniform vec2 uResolution;
+uniform float uAngle;
+uniform float uTanHalf;
+uniform vec3 uEye;
+uniform mat3 uCamera;
+uniform sampler2D uFibres;
+uniform highp sampler2D uSheets;
+#define kPlane0(kI) texelFetch(uSheets,ivec2((kI),0),0)
+#define kPlane1(kI) texelFetch(uSheets,ivec2((kI),1),0)
+#define kPlane2(kI) texelFetch(uSheets,ivec2((kI),2),0)
+#define kPlane3(kI) texelFetch(uSheets,ivec2((kI),3),0)
+#define kPaperU(kI) texelFetch(uSheets,ivec2((kI),4),0)
+#define kPaperV(kI) texelFetch(uSheets,ivec2((kI),5),0)
+#define kInfo(kI) texelFetch(uSheets,ivec2((kI),6),0)
+uniform vec3 uGroupCenter[10];
+uniform vec3 uGroupExtent[10];
+uniform ivec2 uGroupRange[10];
+uniform vec3 uThread[23];
+uniform vec4 uDust[42];
+const float kPI=3.141592653589793;
+const vec3 kKeyDir=vec3(-0.614,0.658,0.439);
+const vec3 kRimDir=vec3(0.267,0.535,-0.802);
+
+float kHash(vec2 kP){vec3 kQ=fract(vec3(kP.xyx)*vec3(.1031,.1030,.0973));kQ+=dot(kQ,kQ.yzx+33.33);return fract((kQ.x+kQ.y)*kQ.z);}
+float kBox(vec3 kP,vec3 kB){vec3 kQ=abs(kP)-kB;return length(max(kQ,0.0))+min(max(kQ.x,max(kQ.y,kQ.z)),0.0);}
+float kCapsule(vec3 kP,vec3 kA,vec3 kB,float kR){vec3 kV=kB-kA;float kH=clamp(dot(kP-kA,kV)/dot(kV,kV),0.0,1.0);return length(kP-kA-kV*kH)-kR;}
+float kSheet(vec3 kP,int kI){
+ float kD=abs(dot(kPlane0(kI).xyz,kP)+kPlane0(kI).w)-kInfo(kI).y;
+ kD=max(kD,dot(kPlane1(kI).xyz,kP)+kPlane1(kI).w);
+ kD=max(kD,dot(kPlane2(kI).xyz,kP)+kPlane2(kI).w);
+ return max(kD,dot(kPlane3(kI).xyz,kP)+kPlane3(kI).w);
+}
+vec2 kField(vec3 kP,bool kClouds){
+ float kClosest=50.0;int kFace=-1;
+ for(int kG=0;kG<10;kG++){
+  if(!kClouds && kG>=6)break;
+  float kBound=kBox(kP-uGroupCenter[kG],uGroupExtent[kG]);
+  if(kBound>kClosest)continue;
+  if(kG==5){
+   for(int kJ=0;kJ<22;kJ++){
+    float kD=kCapsule(kP,uThread[kJ],uThread[kJ+1],.0125);
+    if(kD<kClosest){kClosest=kD;kFace=127;}
+   }
+  }else{
+   int kFirst=uGroupRange[kG].x;int kLast=kFirst+uGroupRange[kG].y;
+   for(int kJ=kFirst;kJ<kLast;kJ++){
+    float kD=kSheet(kP,kJ);
+    if(kD<kClosest){kClosest=kD;kFace=kJ;}
+   }
+  }
+ }
+ return vec2(kClosest,float(kFace));
+}
+vec3 kFaceNormal(vec3 kP,int kI){
+ vec4 kN=kPlane0(kI);float kSlab=dot(kN.xyz,kP)+kN.w;
+ float kD=abs(kSlab)-kInfo(kI).y;vec3 kOut=kN.xyz*sign(kSlab);
+ vec4 kE=kPlane1(kI);float kSide=dot(kE.xyz,kP)+kE.w;
+ if(kSide>kD){kD=kSide;kOut=kE.xyz;}
+ kE=kPlane2(kI);kSide=dot(kE.xyz,kP)+kE.w;
+ if(kSide>kD){kD=kSide;kOut=kE.xyz;}
+ kE=kPlane3(kI);kSide=dot(kE.xyz,kP)+kE.w;
+ if(kSide>kD)kOut=kE.xyz;
+ return kOut;
+}
+vec3 kNormal(vec3 kP,int kI){
+ if(kI!=127)return kFaceNormal(kP,kI);
+ const vec2 kE=vec2(.0015,-.0015);
+ return normalize(kE.xyy*kField(kP+kE.xyy,false).x+kE.yyx*kField(kP+kE.yyx,false).x+kE.yxy*kField(kP+kE.yxy,false).x+kE.xxx*kField(kP+kE.xxx,false).x);
+}
+float kOcclusion(vec3 kP,vec3 kN,bool kCloud){
+ float kTotal=0.0,kWeight=1.0;
+ for(int kI=1;kI<=4;kI++){
+  float kH=.025+float(kI)*.060;
+  float kD=kField(kP+kN*kH,kCloud).x;
+  kTotal+=max(kH-kD,0.0)*kWeight;kWeight*=.55;
+ }
+ return clamp(1.0-2.15*kTotal,.25,1.0);
+}
+float kShadow(vec3 kP,vec3 kL,bool kCloud){
+ float kVis=1.0,kTravel=.035;
+ for(int kJ=0;kJ<20;kJ++){
+  float kD=kField(kP+kTravel*kL,kCloud).x;
+  kVis=min(kVis,10.0*max(kD,0.0)/kTravel);
+  kTravel+=clamp(kD,.026,.36);
+  if(kVis<.025||kTravel>4.5)break;
+ }
+ return mix(.22,1.0,clamp(kVis,0.0,1.0));
+}
+vec3 kStudio(vec3 kD){
+ vec3 kC=mix(vec3(.007,.009,.023),vec3(.065,.078,.15),smoothstep(-.4,.8,kD.y));
+ float kWarm=pow(max(dot(kD,normalize(vec3(-.7,.7,.45))),0.0),7.0);
+ float kTop=pow(max(dot(kD,normalize(vec3(-.1,1.0,.2))),0.0),16.0);
+ float kCool=pow(max(dot(kD,normalize(vec3(.2,.3,-1.0))),0.0),12.0);
+ float kHorizon=exp(-abs(kD.y+.04)*32.0);
+ kC+=vec3(1.35,1.08,.72)*kWarm+vec3(.60,.65,.79)*kTop;
+ kC+=vec3(.19,.25,.72)*kCool+vec3(.052,.068,.13)*kHorizon;
+ return kC;
+}
+float kLine2(vec2 kP,vec2 kA,vec2 kB){vec2 kE=kB-kA;return length(kP-kA-kE*clamp(dot(kP-kA,kE)/dot(kE,kE),0.0,1.0));}
+float kSeal(vec2 kUv){
+ // Original abstract seal: a weathered square and four hand-carved flight marks.
+ vec2 kQ=(kUv-vec2(-.125,1.12))/.35;
+ mat2 kRot=mat2(.9903,-.1392,.1392,.9903);kQ=kRot*kQ;
+ float kEdge=max(abs(kQ.x),abs(kQ.y));
+ float kAa=max(fwidth(kQ.x),fwidth(kQ.y))*.8;
+ float kSquare=1.0-smoothstep(.49-kAa,.49+kAa,kEdge);
+ float kRim=smoothstep(.35-kAa,.35+kAa,kEdge);
+ float kCuts=1.0;
+ float kD=1.0;
+ kD=min(kD,kLine2(kQ,vec2(-.25,.23),vec2(-.04,.23)));
+ kD=min(kD,kLine2(kQ,vec2(-.15,.24),vec2(-.15,-.26)));
+ kD=min(kD,kLine2(kQ,vec2(-.26,.02),vec2(-.035,-.04)));
+ kD=min(kD,kLine2(kQ,vec2(-.24,-.22),vec2(-.04,-.16)));
+ kD=min(kD,kLine2(kQ,vec2(.065,.25),vec2(.26,.25)));
+ kD=min(kD,kLine2(kQ,vec2(.065,.25),vec2(.065,-.03)));
+ kD=min(kD,kLine2(kQ,vec2(.065,-.03),vec2(.26,-.03)));
+ kD=min(kD,kLine2(kQ,vec2(.26,.25),vec2(.26,-.25)));
+ kD=min(kD,kLine2(kQ,vec2(.06,-.25),vec2(.26,-.25)));
+ float kGlyph=1.0-smoothstep(.028-kAa,.028+kAa,kD);
+ float kInk=max(kRim,kGlyph);
+ float kWear=texture(uFibres,kUv*vec2(10.0,11.0)).r;
+ return kSquare*kInk*mix(.82,1.0,smoothstep(.12,.6,kWear));
+}
+vec3 kShade(vec3 kP,vec3 kRd,float kTravel,int kI){
+ bool kSilk=kI==127;
+ float kKind=kSilk?6.0:kInfo(kI).x;
+ bool kCloud=kKind>=3.0&&!kSilk;
+ vec3 kN=kNormal(kP,kI),kTrueN=kN;
+ vec2 kUv=kSilk?vec2(kP.x+kP.z,kP.y):vec2(dot(kPaperU(kI).xyz,kP)+kPaperU(kI).w,dot(kPaperV(kI).xyz,kP)+kPaperV(kI).w);
+ float kGrain=texture(uFibres,kUv*vec2(4.7,9.2)).r;
+ float kFibre=texture(uFibres,kUv*vec2(.18,4.2)).g;
+ float kFine=texture(uFibres,kUv*vec2(5.5,.18)).b;
+ if(!kSilk){
+  vec3 kT=normalize(kPaperU(kI).xyz);vec3 kB=normalize(cross(kN,kT));
+  kN=normalize(kN+kT*(kFibre-.5)*.035+kB*(kFine-.5)*.026);
+ }
+ float kAo=kOcclusion(kP+kTrueN*.009,kTrueN,kCloud);
+ float kSh=kShadow(kP+kTrueN*.014,kKeyDir,kCloud);
+ float kNdL=max(dot(kN,kKeyDir),0.0);
+ float kNdR=max(dot(kN,kRimDir),0.0);
+ float kView=clamp(dot(kN,-kRd),0.0,1.0);
+ float kFres=pow(1.0-kView,4.0);
+ float kBack=pow(max(dot(-kN,kKeyDir),0.0),1.7);
+ vec3 kBase=vec3(.73,.676,.548)*(1.0+(kGrain-.5)*.07+(kFibre-.5)*.025);
+ if(kKind==1.0){float kStamp=kSeal(kUv);kBase=mix(kBase,vec3(.80,.032,.010),kStamp);}
+ if(kCloud){
+  kBase=mix(vec3(.19,.21,.28),vec3(.30,.295,.29),clamp((kKind-3.0)*.25,0.0,1.0));
+  kBase*=.82+(kGrain-.5)*.035;
+ }
+ if(kSilk)kBase=vec3(.68,.018,.006);
+ vec3 kAmbient=vec3(.13,.15,.23)*(.50+.50*max(kN.y,0.0));
+ if(!kCloud&&!kSilk)kAmbient+=vec3(.050,.044,.033);
+ vec3 kWarm=vec3(1.65,1.29,.82);
+ vec3 kCool=vec3(.22,.29,.78);
+ vec3 kC=kBase*(kAmbient*kAo+kWarm*kNdL*kSh+kCool*kNdR*.7);
+ if(!kCloud&&!kSilk){
+  // Thin fibrous paper transmits the raking warm key, without turning waxy.
+  kC+=vec3(.94,.63,.28)*kBack*.23*(.78+.22*kFibre)*kSh;
+  kC+=kStudio(reflect(kRd,kN))*(.025+.095*kFres)*kAo;
+  vec3 kH=normalize(kKeyDir-kRd);
+  kC+=vec3(1.0,.82,.54)*pow(max(dot(kN,kH),0.0),30.0)*.11*kSh;
+  float kCrease=max(dot(kPlane1(kI).xyz,kP)+kPlane1(kI).w,max(dot(kPlane2(kI).xyz,kP)+kPlane2(kI).w,dot(kPlane3(kI).xyz,kP)+kPlane3(kI).w));
+  float kEdge=exp(-abs(kCrease)*185.0);
+  kC+=vec3(.56,.45,.30)*kEdge*(.12+.45*kNdL)*kAo;
+  kC+=vec3(.26,.30,.61)*kFres*.15;
+ }
+ if(kSilk){
+  kC+=vec3(.33,.017,.005)*(.20+.8*kFres);
+  kC+=vec3(1.4,.23,.06)*pow(max(dot(kN,normalize(kKeyDir-kRd)),0.0),45.0)*.8;
+ }
+ if(kCloud){kC*=.53;kC+=vec3(.04,.053,.105)*(1.0-kAo);}
+ float kFog=kCloud?1.0-exp(-kTravel*.029):1.0-exp(-kTravel*.004);
+ return mix(kC,vec3(.012,.016,.036),kFog);
+}
+vec2 kSlab(vec3 kRo,vec3 kRd,vec3 kC,vec3 kE){
+ vec3 kInv=1.0/(kRd+vec3(1e-8));vec3 kA=(kC-kE-kRo)*kInv,kB=(kC+kE-kRo)*kInv;
+ vec3 kLo=min(kA,kB),kHi=max(kA,kB);
+ return vec2(max(kLo.x,max(kLo.y,kLo.z)),min(kHi.x,min(kHi.y,kHi.z)));
+}
+vec3 kAtmosphere(vec3 kRd,vec2 kScreen){
+ float kBloom=exp(-length((kScreen-vec2(-.74,.35))*vec2(.68,1.2))*3.1);
+ vec3 kC=vec3(.0045,.006,.015)+vec3(.019,.017,.019)*kBloom;
+ kC+=vec3(.007,.011,.032)*exp(-length(kScreen-vec2(.65,.25))*2.4);
+ // Broad, translucent shafts; their small breathing motion closes at the seam.
+ float kTilt=kScreen.x+.43*kScreen.y;
+ float kShift=.012*sin(uAngle);
+ float kShaft=exp(-pow((kTilt+.57+kShift)*10.0,2.0))*.0028;
+ kShaft+=exp(-pow((kTilt+.92-kShift)*16.0,2.0))*.0023;
+ kC+=vec3(1.0,.78,.48)*kShaft*smoothstep(-.9,.7,kScreen.y);
+ return kC;
+}
+void main(){
+ vec2 kScreen=(2.0*gl_FragCoord.xy-uResolution)/uResolution.y;
+ vec3 kRd=normalize(uCamera*vec3(kScreen*uTanHalf,1.0));
+ vec3 kC=kAtmosphere(kRd,kScreen);
+ float kNear=100.0,kFar=-1.0;
+ for(int kG=0;kG<10;kG++){
+  vec2 kSpan=kSlab(uEye,kRd,uGroupCenter[kG],uGroupExtent[kG]);
+  if(kSpan.x<=kSpan.y&&kSpan.y>0.0){kNear=min(kNear,max(kSpan.x,0.0));kFar=max(kFar,kSpan.y);}
+ }
+ float kTravel=kNear;int kHit=-1;float kBestDist=100.0;
+ if(kFar>kNear){
+  for(int kStep=0;kStep<94;kStep++){
+   vec2 kD=kField(uEye+kRd*kTravel,true);
+   float kEpsilon=max(.00025,kTravel*uTanHalf/uResolution.y*.32);
+   if(kD.x<kEpsilon){kHit=int(kD.y+.1);break;}
+   kTravel+=max(kD.x*.92,.0005);
+   if(kTravel>kFar+.03)break;
+  }
+ }
+ float kDefocus=.85;
+ if(kHit>=0){
+  kC=kShade(uEye+kRd*kTravel,kRd,kTravel,kHit);
+  if(kHit!=127&&kInfo(kHit).x>=3.0)kDefocus=clamp((kTravel-8.2)*.22,.15,.95);
+ }
+ // A fixed seeded cloud of world-space dust. Each particle follows a closed oval.
+ for(int kI=0;kI<42;kI++){
+  vec4 kSeed=uDust[kI];
+  float kPhi=kSeed.w*6.28318530718;
+  vec3 kPos=kSeed.xyz+vec3(.13*cos(uAngle+kPhi),.15*sin(uAngle+kPhi),.075*sin(2.0*uAngle+kPhi));
+  vec3 kDelta=kPos-uEye;float kAlong=dot(kDelta,kRd);
+  if(kAlong>0.0&&(kHit<0||kAlong<kTravel)){
+   float kRad=.005+pow(kSeed.w,4.0)*.017;
+   float kDist2=max(dot(kDelta,kDelta)-kAlong*kAlong,0.0);
+   float kGlow=exp(-kDist2/(kRad*kRad));
+   float kSoft=exp(-kDist2/(kRad*kRad*13.0))*.055;
+   float kLit=.035+.13*pow(max(sin(kPhi+uAngle),0.0),2.0);
+   kC+=vec3(1.0,.84,.63)*(kGlow+kSoft)*kLit;
+  }
+ }
+ // Encode up to six linear light units into a universally supported RGBA8 FBO.
+ vec3 kEncoded=sqrt(clamp(kC/6.0,0.0,1.0));
+ kEncoded+=(kHash(gl_FragCoord.xy)-.5)/255.0;
+ fragColor=vec4(kEncoded,kDefocus);
+}`;
+
+const kPostFS=`#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D uScene;
+uniform vec2 uResolution;
+vec3 kLinear(vec2 kUv){vec3 kC=texture(uScene,kUv).rgb;return kC*kC*6.0;}
+vec3 kAces(vec3 kV){return clamp((kV*(2.51*kV+.03))/(kV*(2.43*kV+.59)+.14),0.0,1.0);}
+float kHash(vec2 kP){vec3 kQ=fract(vec3(kP.xyx)*.1031);kQ+=dot(kQ,kQ.yzx+33.33);return fract((kQ.x+kQ.y)*kQ.z);}
+void main(){
+ vec2 kPixel=1.0/uResolution;
+ vec4 kCenter=texture(uScene,vUv);vec3 kC=kCenter.rgb*kCenter.rgb*6.0;
+ vec2 kDelta=vUv-.5;
+ float kCa=dot(kDelta,kDelta)*.00065;
+ kC.r=mix(kC.r,kLinear(vUv+kDelta*kCa).r,.65);
+ kC.b=mix(kC.b,kLinear(vUv-kDelta*kCa).b,.65);
+ float kBlur=kCenter.a*2.4;
+ vec3 kSoft=kC*.20;vec3 kBloom=vec3(0.0);
+ for(int kI=0;kI<8;kI++){
+  float kA=float(kI)*.7853981634;vec2 kDir=vec2(cos(kA),sin(kA));
+  vec2 kUv=vUv+kDir*kPixel*kBlur;
+  vec4 kTap=texture(uScene,kUv);float kSafe=smoothstep(.04,.18,kTap.a);
+  kSoft+=mix(kC,kTap.rgb*kTap.rgb*6.0,kSafe)*.10;
+  kBloom+=max(kLinear(vUv+kDir*kPixel*4.0)-.68,0.0)*.037;
+  kBloom+=max(kLinear(vUv+kDir*kPixel*10.0)-.85,0.0)*.019;
+ }
+ kC=mix(kC,kSoft,smoothstep(.05,.35,kCenter.a))+kBloom;
+ float kVign=1.0-.23*pow(clamp(length(kDelta)*1.32,0.0,1.0),1.6);
+ kC=kAces(kC*1.11*kVign);
+ kC=pow(kC,vec3(1.0/2.2));
+ // Static fine grain cannot introduce a temporal seam, even in frozen captures.
+ float kGrain=(kHash(gl_FragCoord.xy)-.5)/255.0;
+ kC+=kGrain*.72;
+ fragColor=vec4(kC,1.0);
+}`;
+
+function kCompile(kType,kSource){
+ const kShader=kGl.createShader(kType);kGl.shaderSource(kShader,kSource);kGl.compileShader(kShader);
+ const kLog=kGl.getShaderInfoLog(kShader);if(kLog.trim())console[kGl.getShaderParameter(kShader,kGl.COMPILE_STATUS)?'warn':'error'](kLog);
+ if(!kGl.getShaderParameter(kShader,kGl.COMPILE_STATUS))throw new Error('Shader compilation failed: '+kLog);
+ return kShader;
+}
+function kProgram(kFrag){
+ const kP=kGl.createProgram(),kV=kCompile(kGl.VERTEX_SHADER,kVS),kF=kCompile(kGl.FRAGMENT_SHADER,kFrag);
+ kGl.attachShader(kP,kV);kGl.attachShader(kP,kF);kGl.linkProgram(kP);
+ const kLog=kGl.getProgramInfoLog(kP);if(kLog.trim())console[kGl.getProgramParameter(kP,kGl.LINK_STATUS)?'warn':'error'](kLog);
+ if(!kGl.getProgramParameter(kP,kGl.LINK_STATUS))throw new Error('Program link failed: '+kLog);
+ kGl.deleteShader(kV);kGl.deleteShader(kF);return kP;
+}
+const kV3={
+ add:(a,b)=>a.map((v,i)=>v+b[i]),sub:(a,b)=>a.map((v,i)=>v-b[i]),mul:(a,s)=>a.map(v=>v*s),
+ dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+ cross:(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],
+ norm:a=>{const d=Math.hypot(...a);return a.map(v=>v/d);}
+};
+const kMix=(a,b,t)=>a.map((v,i)=>v*(1-t)+b[i]*t);
+function kRx(p,a){const c=Math.cos(a),s=Math.sin(a);return[p[0],c*p[1]-s*p[2],s*p[1]+c*p[2]];}
+function kRy(p,a){const c=Math.cos(a),s=Math.sin(a);return[c*p[0]+s*p[2],p[1],-s*p[0]+c*p[2]];}
+function kRz(p,a){const c=Math.cos(a),s=Math.sin(a);return[c*p[0]-s*p[1],s*p[0]+c*p[1],p[2]];}
+function kMulberry32(a){return()=>{let t=a+=0x6D2B79F5;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296;};}
+
+let kSceneProgram,kPostProgram,kFbo,kSceneTex,kFibreTex,kSheetTex,kVao;
+let kLoc={},kPostLoc={},kW=0,kH=0;
+const kSheetPixels=new Float32Array(kMaxFaces*7*4);
+const kPlanes=Array.from({length:4},()=>new Float32Array(kMaxFaces*4));
+const kPaperU=new Float32Array(kMaxFaces*4),kPaperV=new Float32Array(kMaxFaces*4),kInfo=new Float32Array(kMaxFaces*4);
+const kGroupC=new Float32Array(kMaxGroups*3),kGroupE=new Float32Array(kMaxGroups*3),kRanges=new Int32Array(kMaxGroups*2);
+const kThread=new Float32Array((kThreadCount+1)*3),kDust=new Float32Array(kDustCount*4);
+let kCount=0,kGroupVertices=[],kDebugBounds=[];
+
+function kInit(){
+ kSceneProgram=kProgram(kFS);kPostProgram=kProgram(kPostFS);
+ kVao=kGl.createVertexArray();kGl.bindVertexArray(kVao);
+ for(const kName of ['uResolution','uAngle','uTanHalf','uEye','uCamera','uFibres','uSheets','uGroupCenter[0]','uGroupExtent[0]','uGroupRange[0]','uThread[0]','uDust[0]'])kLoc[kName]=kGl.getUniformLocation(kSceneProgram,kName);
+ for(const kName of ['uScene','uResolution'])kPostLoc[kName]=kGl.getUniformLocation(kPostProgram,kName);
+ const kRand=kMulberry32(0xC4A6E10D),kPixels=new Uint8Array(256*256*4);
+ for(let i=0;i<kPixels.length;i+=4){kPixels[i]=(kRand()*256)|0;kPixels[i+1]=(kRand()*256)|0;kPixels[i+2]=(kRand()*256)|0;kPixels[i+3]=255;}
+ for(let i=0;i<kDustCount;i++){kDust.set([(kRand()-.5)*8.8,(kRand()-.42)*5.5,(kRand()-.5)*7.4,kRand()],i*4);}
+ kFibreTex=kGl.createTexture();kGl.activeTexture(kGl.TEXTURE0);kGl.bindTexture(kGl.TEXTURE_2D,kFibreTex);
+ kGl.texImage2D(kGl.TEXTURE_2D,0,kGl.RGBA8,256,256,0,kGl.RGBA,kGl.UNSIGNED_BYTE,kPixels);
+ kGl.texParameteri(kGl.TEXTURE_2D,kGl.TEXTURE_WRAP_S,kGl.REPEAT);kGl.texParameteri(kGl.TEXTURE_2D,kGl.TEXTURE_WRAP_T,kGl.REPEAT);
+ kGl.texParameteri(kGl.TEXTURE_2D,kGl.TEXTURE_MIN_FILTER,kGl.LINEAR_MIPMAP_LINEAR);kGl.texParameteri(kGl.TEXTURE_2D,kGl.TEXTURE_MAG_FILTER,kGl.LINEAR);kGl.generateMipmap(kGl.TEXTURE_2D);
+ // Float data textures are core WebGL2. Sheet planes occupy texture memory,
+ // keeping the fragment uniform budget small on phones and tablets.
+ kSheetTex=kGl.createTexture();kGl.activeTexture(kGl.TEXTURE1);kGl.bindTexture(kGl.TEXTURE_2D,kSheetTex);
+ kGl.texImage2D(kGl.TEXTURE_2D,0,kGl.RGBA32F,kMaxFaces,7,0,kGl.RGBA,kGl.FLOAT,kSheetPixels);
+ for(const kParam of [kGl.TEXTURE_WRAP_S,kGl.TEXTURE_WRAP_T])kGl.texParameteri(kGl.TEXTURE_2D,kParam,kGl.CLAMP_TO_EDGE);
+ for(const kParam of [kGl.TEXTURE_MIN_FILTER,kGl.TEXTURE_MAG_FILTER])kGl.texParameteri(kGl.TEXTURE_2D,kParam,kGl.NEAREST);
+ kGl.activeTexture(kGl.TEXTURE0);
+ kSceneTex=kGl.createTexture();kGl.bindTexture(kGl.TEXTURE_2D,kSceneTex);
+ for(const kParam of [kGl.TEXTURE_WRAP_S,kGl.TEXTURE_WRAP_T])kGl.texParameteri(kGl.TEXTURE_2D,kParam,kGl.CLAMP_TO_EDGE);
+ for(const kParam of [kGl.TEXTURE_MIN_FILTER,kGl.TEXTURE_MAG_FILTER])kGl.texParameteri(kGl.TEXTURE_2D,kParam,kGl.LINEAR);
+ kFbo=kGl.createFramebuffer();kW=0;kH=0;kReady=true;
+}
+function kFit(){
+ const kDpr=Math.min(window.devicePixelRatio||1,2)*(kFrozen?2:1.5);
+ // Supersample the device pixel grid. Frozen renders permit 4K+ detail;
+ // live renders use a fixed four-megapixel budget, with no temporal scaling.
+ let kWidth=Math.max(1,Math.round(innerWidth*kDpr)),kHeight=Math.max(1,Math.round(innerHeight*kDpr));
+ const kBudget=kFrozen?16777216:4200000;
+ const kScale=Math.min(1,Math.sqrt(kBudget/(kWidth*kHeight)));
+ kWidth=Math.max(1,Math.round(kWidth*kScale));kHeight=Math.max(1,Math.round(kHeight*kScale));
+ if(kWidth===kW&&kHeight===kH)return;
+ kW=kCanvas.width=kWidth;kH=kCanvas.height=kHeight;
+ kGl.bindTexture(kGl.TEXTURE_2D,kSceneTex);kGl.texImage2D(kGl.TEXTURE_2D,0,kGl.RGBA8,kW,kH,0,kGl.RGBA,kGl.UNSIGNED_BYTE,null);
+ kGl.bindFramebuffer(kGl.FRAMEBUFFER,kFbo);kGl.framebufferTexture2D(kGl.FRAMEBUFFER,kGl.COLOR_ATTACHMENT0,kGl.TEXTURE_2D,kSceneTex,0);
+ if(kGl.checkFramebufferStatus(kGl.FRAMEBUFFER)!==kGl.FRAMEBUFFER_COMPLETE)throw new Error('Scene framebuffer is incomplete.');
+ kGl.bindFramebuffer(kGl.FRAMEBUFFER,null);
+}
+function kFace(kVerts,kUvs,kKind,kGroup,kThick=.0055){
+ const kI=kCount++;if(kI>=127)throw new Error('The folded-sheet budget was exceeded.');
+ const[a,b,c]=kVerts,kN=kV3.norm(kV3.cross(kV3.sub(b,a),kV3.sub(c,a)));
+ kPlanes[0].set([...kN,-kV3.dot(kN,a)],kI*4);
+ for(let j=0;j<3;j++){
+  const p=kVerts[j],q=kVerts[(j+1)%3],r=kVerts[(j+2)%3];let e=kV3.norm(kV3.cross(kV3.sub(q,p),kN));
+  if(kV3.dot(e,kV3.sub(r,p))>0)e=kV3.mul(e,-1);
+  kPlanes[j+1].set([...e,-kV3.dot(e,p)],kI*4);
+ }
+ const kE=kV3.sub(b,a),kF=kV3.sub(c,a),kEE=kV3.dot(kE,kE),kFF=kV3.dot(kF,kF),kEF=kV3.dot(kE,kF),kDet=kEE*kFF-kEF*kEF;
+ for(let j=0;j<2;j++){
+  const d1=kUvs[1][j]-kUvs[0][j],d2=kUvs[2][j]-kUvs[0][j];
+  const u=(d1*kFF-d2*kEF)/kDet,v=(d2*kEE-d1*kEF)/kDet,kGrad=kV3.add(kV3.mul(kE,u),kV3.mul(kF,v));
+  (j===0?kPaperU:kPaperV).set([...kGrad,kUvs[0][j]-kV3.dot(kGrad,a)],kI*4);
+ }
+ kInfo.set([kKind,kThick,kGroup,0],kI*4);kGroupVertices[kGroup].push(...kVerts);
+}
+function kGroupBegin(kG){kRanges[kG*2]=kCount;}
+function kGroupEnd(kG){kRanges[kG*2+1]=kCount-kRanges[kG*2];}
+
+function kGeometry(kA){
+ kCount=0;kGroupVertices=Array.from({length:10},()=>[]);kDebugBounds=[];
+ const kShift=[.19*Math.sin(kA),.105*Math.sin(2*kA),.11*Math.cos(kA)];
+ const kBank=.73+.09*Math.sin(kA),kYaw=-.11+.12*Math.cos(kA),kPitch=-.05+.055*Math.sin(2*kA);
+ // Narrow frames receive a fixed additional flight bank. The cloud horizon
+ // stays level; the paper is reframed without stretching its proportions.
+ const kPortrait=Math.max(0,Math.min(1,(1.30-kW/kH)/.50));
+ const kPortraitRoll=kPortrait*Math.PI/3;
+ const kViewAxis=kV3.norm([5.70,1.03,7.50]);
+ const kViewRight=kV3.norm([kViewAxis[2],0,-kViewAxis[0]]);
+ const kViewUp=kV3.cross(kViewRight,kV3.mul(kViewAxis,-1));
+ const kReframe=kV3.add(kV3.mul(kViewRight,-.24*kPortrait),kV3.mul(kViewUp,.34*kPortrait));
+ const kWorld=p=>{
+  let w=kV3.add(kRz(kRy(kRx(p,kBank),kYaw),kPitch),kShift);
+  if(kPortrait>0){
+   const v=kV3.sub(w,[.15,.12,0]),c=Math.cos(kPortraitRoll),s=Math.sin(kPortraitRoll);
+   w=kV3.add([.15,.12,0],kV3.add(kV3.add(kV3.mul(v,c),kV3.mul(kV3.cross(kViewAxis,v),s)),kV3.mul(kViewAxis,kV3.dot(kViewAxis,v)*(1-c))));
+   w=kV3.add(w,kReframe);
+  }
+  return w;
+ };
+ const kSimple=(v,kind,g)=>kFace(v.map(kWorld),v.map(p=>[p[0],p[1]+p[2]*.71]),kind,g);
+
+ // An eight-facet diamond keel: the characteristic closed bird-base of origami.
+ kGroupBegin(0);
+ const F=[-.55,.10,0],T=[.66,.10,0],R=[.03,.44,0],D=[.02,-.22,0],S=[.015,.10,.30],B=[.015,.10,-.30];
+ for(const v of [[F,R,S],[R,T,S],[T,D,S],[D,F,S],[R,F,B],[T,R,B],[D,T,B],[F,D,B]])kSimple(v,0,0);
+ kGroupEnd(0);
+
+ // Wings are welded at their shared vertices. Five crisp planes per wing;
+ // the outer triangle hinges along U--V at twice the flap frequency.
+ for(let side=-1;side<=1;side+=2){
+  const g=side===1?1:2;kGroupBegin(g);
+  const a=[-.49,.14,side*.13],b=[.64,.14,side*.15],t=[-.35,.60,side*2.22];
+  const u=kMix(a,t,.60),v=kMix(b,t,.60),c=[.04,.335,side*.79];
+  const rest=[a,b,c,u,v,t];
+  const flap=.09+.245*Math.cos(kA),flutter=.065*Math.sin(2*kA+.4);
+  const tip=kV3.add(u,kRx(kV3.sub(t,u),-side*flutter));
+  const articulated=[a,b,c,u,v,tip].map(p=>kV3.add([0,.14,side*.14],kRx(kV3.sub(p,[0,.14,side*.14]),-side*flap)));
+  for(const ids of [[0,1,2],[1,4,2],[4,3,2],[3,0,2],[3,4,5]]){
+   kFace(ids.map(i=>kWorld(articulated[i])),ids.map(i=>[rest[i][0],Math.abs(rest[i][2])]),side===1?1:2,g,.0045);
+  }
+  kGroupEnd(g);
+ }
+
+ // Tapered double-reverse neck fold and a pointed, tucked beak.
+ kGroupBegin(3);
+ const n0=[-.62,.01,0],n1=[-.27,.16,0],n2=[-.43,.11,.105],n3=[-.43,.11,-.105];
+ const h0=[-1.15,1.36,0],h1=[-.98,1.29,0],h2=[-1.065,1.30,.046],h3=[-1.065,1.30,-.046];
+ for(const v of [[n0,h0,h2],[n0,h2,n2],[n2,h2,h1],[n2,h1,n1],[n1,h1,h3],[n1,h3,n3],[n3,h3,h0],[n3,h0,n0]])kSimple(v,0,3);
+ const beak=[-1.66,1.105,0],brow=[-1.19,1.415,0],cheek0=[-1.10,1.29,.067],cheek1=[-1.10,1.29,-.067],tuck=[-.99,1.28,0];
+ for(const v of [[beak,brow,cheek0],[beak,cheek1,brow],[beak,cheek0,tuck],[beak,tuck,cheek1],[brow,tuck,cheek0],[brow,cheek1,tuck]])kSimple(v,0,3);
+ kGroupEnd(3);
+
+ // Opposing tall tail, with the silk tied precisely to its paper tip.
+ kGroupBegin(4);
+ const ta=[.30,.17,0],tb=[.67,.04,0],tl=[.53,.16,.105],tr=[.53,.16,-.105],tt=[1.51,1.02,0];
+ for(const v of [[ta,tl,tt],[tl,tb,tt],[tb,tr,tt],[tr,ta,tt]])kSimple(v,0,4);
+ kGroupEnd(4);
+ kRanges[10]=kCount;kRanges[11]=0;
+ for(let j=0;j<=kThreadCount;j++){
+  const s=j/kThreadCount;
+  const p=[tt[0]+1.15*s-.28*s*s+.09*s*s*Math.sin(kA-4.5*s),tt[1]-1.68*s+.15*s*Math.sin(kA-3.8*s),.11*Math.sin(Math.PI*s)*Math.sin(kA-3*s)+.13*s*s*Math.sin(2*kA-2*s)];
+  const w=kWorld(p);kThread.set(w,j*3);kGroupVertices[5].push(w);
+ }
+
+ // Three sculpted paper-cloud banks, each at a distinct focal distance.
+ // Angular lobes and lifted alternating pleats avoid a rounded "blob" base.
+ const outline=[[-2.70,0],[-2.58,.18],[-2.38,.28],[-1.93,.28],[-1.89,.42],[-1.70,.57],[-1.42,.63],[-1.10,.57],[-.93,.38],[-.73,.34],[-.67,.56],[-.42,.78],[-.10,.85],[.20,.80],[.43,.63],[.50,.35],[.85,.32],[1.0,.48],[1.26,.58],[1.58,.55],[1.80,.38],[1.88,.20],[2.19,.18],[2.45,.03],[2.31,-.18],[2.10,-.27],[-2.25,-.27],[-2.60,-.18]];
+ const banks=[[-1.85,-2.12,-4.2,1.03,.25],[1.85,-2.05,-1.3,.91,-.24],[-2.25,-2.42,2.0,1.05,.18]];
+ for(let j=0;j<3;j++){
+  const g=6+j;kGroupBegin(g);const [x,y,z,s,rot]=banks[j];
+  const shift=[x+.35*Math.sin(kA+j*1.8),y+.045*Math.cos(kA+j),z+.16*Math.cos(kA+j*1.3)];
+  const cv=p=>kV3.add(kRy(kV3.mul(p,s),rot),shift);
+  const points=outline.map((p,i)=>[p[0],p[1],(i%3===1)?.075:0]);
+  const peak=[-.22,.17,.47];
+  for(let i=0;i<points.length;i++){
+   const a=points[i],b=points[(i+1)%points.length];
+   kFace([a,b,peak].map(cv),[a,b,peak].map(p=>[p[0],p[1]]),3+Math.min(j,2),g,.013);
+  }
+  kGroupEnd(g);
+ }
+ for(let g=0;g<10;g++){
+  const verts=kGroupVertices[g];
+  if(verts.length===0){kGroupC.set([100,100,100],g*3);kGroupE.set([.01,.01,.01],g*3);kRanges.set([kCount,0],g*2);continue;}
+  const lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
+  for(const p of verts)for(let j=0;j<3;j++){lo[j]=Math.min(lo[j],p[j]);hi[j]=Math.max(hi[j],p[j]);}
+  const pad=g===5?.022:.025;
+  for(let j=0;j<3;j++){kGroupC[g*3+j]=(lo[j]+hi[j])*.5;kGroupE[g*3+j]=(hi[j]-lo[j])*.5+pad;}
+  if(g<6)kDebugBounds.push(...verts);
+ }
+}
+
+function kRender(kTimestamp){
+ if(!kReady)return;
+ kFit();
+ const kP=kFrozen?kFrozenPhase:((kTimestamp/1000)%kL)/kL;
+ const kA=kTAU*kP;kGeometry(kA);
+ const kAspect=kW/kH;
+ const kEye=[5.85,1.15,7.5],kTarget=[.15,.12,0];
+ const kForward=kV3.norm(kV3.sub(kTarget,kEye)),kRight=kV3.norm(kV3.cross(kForward,[0,1,0])),kUp=kV3.cross(kRight,kForward);
+ // A fixed envelope fits every phase, including the thread, in portrait 4:5.
+ const kTan=Math.max(.258,.254/Math.max(kAspect,.30),.330-.29*Math.abs(kAspect-1.04));
+ kGl.viewport(0,0,kW,kH);kGl.bindVertexArray(kVao);kGl.bindFramebuffer(kGl.FRAMEBUFFER,kFbo);kGl.useProgram(kSceneProgram);
+ kGl.activeTexture(kGl.TEXTURE0);kGl.bindTexture(kGl.TEXTURE_2D,kFibreTex);kGl.uniform1i(kLoc.uFibres,0);
+ kGl.uniform2f(kLoc.uResolution,kW,kH);kGl.uniform1f(kLoc.uAngle,kA);kGl.uniform1f(kLoc.uTanHalf,kTan);
+ kGl.uniform3fv(kLoc.uEye,kEye);kGl.uniformMatrix3fv(kLoc.uCamera,false,[...kRight,...kUp,...kForward]);
+ // Upload the signed planes and intrinsic paper coordinates as seven rows.
+ for(let i=0;i<4;i++)kSheetPixels.set(kPlanes[i],i*kMaxFaces*4);
+ kSheetPixels.set(kPaperU,4*kMaxFaces*4);kSheetPixels.set(kPaperV,5*kMaxFaces*4);kSheetPixels.set(kInfo,6*kMaxFaces*4);
+ kGl.activeTexture(kGl.TEXTURE1);kGl.bindTexture(kGl.TEXTURE_2D,kSheetTex);
+ kGl.texSubImage2D(kGl.TEXTURE_2D,0,0,0,kMaxFaces,7,kGl.RGBA,kGl.FLOAT,kSheetPixels);kGl.uniform1i(kLoc.uSheets,1);
+ kGl.activeTexture(kGl.TEXTURE0);
+ kGl.uniform3fv(kLoc['uGroupCenter[0]'],kGroupC);kGl.uniform3fv(kLoc['uGroupExtent[0]'],kGroupE);kGl.uniform2iv(kLoc['uGroupRange[0]'],kRanges);
+ kGl.uniform3fv(kLoc['uThread[0]'],kThread);kGl.uniform4fv(kLoc['uDust[0]'],kDust);kGl.drawArrays(kGl.TRIANGLES,0,3);
+ kGl.bindFramebuffer(kGl.FRAMEBUFFER,null);kGl.useProgram(kPostProgram);kGl.bindTexture(kGl.TEXTURE_2D,kSceneTex);
+ kGl.uniform1i(kPostLoc.uScene,0);kGl.uniform2f(kPostLoc.uResolution,kW,kH);kGl.drawArrays(kGl.TRIANGLES,0,3);
+ // Read-only metadata for offline renderers and framing verification.
+ window.__craneFrame={phase:kP,loopSeconds:kL,width:kW,height:kH,faceCount:kCount,eye:kEye,right:kRight,up:kUp,forward:kForward,tanHalf:kTan,vertices:kDebugBounds};
+ if(!kFrozen)kFrameHandle=requestAnimationFrame(kRender);
+}
+kCanvas.addEventListener('webglcontextlost',e=>{e.preventDefault();kReady=false;cancelAnimationFrame(kFrameHandle);});
+kCanvas.addEventListener('webglcontextrestored',()=>{try{kInit();kFrameHandle=requestAnimationFrame(kRender);}catch(e){console.error(e);}});
+addEventListener('resize',()=>{if(kFrozen&&kReady)kFrameHandle=requestAnimationFrame(kRender);},{passive:true});
+try{kInit();kFrameHandle=requestAnimationFrame(kRender);}catch(e){console.error('Origami Crane at Dusk:',e);}
+})();
+</script>
+</body>
+</html>

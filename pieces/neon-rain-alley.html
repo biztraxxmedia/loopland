@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#020508">
+<meta name="color-scheme" content="dark">
+<title>Neon Rain Alley at 2 AM</title>
+<link rel="icon" href="data:,">
+<style>
+  html,body{width:100%;height:100%;margin:0;overflow:hidden;background:#020508}
+  canvas{display:block;width:100vw;height:100vh;width:100dvw;height:100dvh;touch-action:none}
+</style>
+</head>
+<body>
+<canvas aria-label="A ten-second cinematic loop of neon rain in a midnight alley"></canvas>
+<script>
+/*
+   NEON RAIN ALLEY AT 2 AM
+   An original procedural moving image. No assets, libraries, or network calls.
+
+   Timing: requestAnimationFrame timestamp -> canonical phase -> angle.
+   Camera, fog, water, neon, rain and grain all use the same circular clock.
+   ?t=0.37 freezes a phase; ?t=1 is canonically identical to ?t=0.
+   The scene is sampled on a 2 x 2 grid before a linear-light bloom resolve.
+*/
+(() => {
+  'use strict';
+  const canvas = document.querySelector('canvas');
+  const gl = canvas.getContext('webgl2', {
+    alpha:false, antialias:false, depth:false, stencil:false,
+    premultipliedAlpha:false, preserveDrawingBuffer:true,
+    powerPreference:'high-performance'
+  });
+  if (!gl) { console.error('This artwork requires WebGL 2.'); return; }
+
+  const vertexSource = `#version 300 es
+  precision highp float;
+  out vec2 vUv;
+  void main(){
+    vec2 kPos=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));
+    vUv=kPos;
+    gl_Position=vec4(kPos*2.0-1.0,0.0,1.0);
+  }`;
+
+  const sceneSource = `#version 300 es
+  precision highp float;
+  precision highp int;
+  uniform vec2 uResolution;
+  uniform float uAngle;
+  uniform float uSeed;
+  in vec2 vUv;
+  out vec4 fragColor;
+  const float kPi=3.141592653589793;
+  const float kTau=6.283185307179586;
+  const vec3 kPink=vec3(1.0,0.006,0.175);
+  const vec3 kTeal=vec3(0.035,0.50,0.57);
+  const vec3 kSteel=vec3(0.13,0.22,0.31);
+
+  float kHash(vec2 kP){
+    vec3 kQ=fract(vec3(kP.xyx)*vec3(.1031,.1030,.0973));
+    kQ+=dot(kQ,kQ.yzx+33.33+uSeed);
+    return fract((kQ.x+kQ.y)*kQ.z);
+  }
+  vec2 kHash2(vec2 kP){return vec2(kHash(kP),kHash(kP+vec2(37.1,19.7)));}
+  float kValue(vec2 kP){
+    vec2 kI=floor(kP),kF=fract(kP); kF=kF*kF*(3.0-2.0*kF);
+    return mix(mix(kHash(kI),kHash(kI+vec2(1,0)),kF.x),
+               mix(kHash(kI+vec2(0,1)),kHash(kI+vec2(1,1)),kF.x),kF.y);
+  }
+  float kField(vec2 kP){return .64*kValue(kP)+.25*kValue(kP*2.07+13.3)+.11*kValue(kP*4.11-7.4);}
+  mat2 kTurn(float kA){float kC=cos(kA),kS=sin(kA);return mat2(kC,-kS,kS,kC);}
+  float kBox(vec3 kP,vec3 kB){vec3 kQ=abs(kP)-kB;return length(max(kQ,0.0))+min(max(kQ.x,max(kQ.y,kQ.z)),0.0);}
+  float kRoundBox(vec3 kP,vec3 kB,float kR){return kBox(kP,kB)-kR;}
+  float kBox2(vec2 kP,vec2 kB,float kR){vec2 kQ=abs(kP)-kB+kR;return min(max(kQ.x,kQ.y),0.0)+length(max(kQ,0.0))-kR;}
+  float kLine(vec2 kP,vec2 kB,vec2 kC){vec2 kV=kP-kB,kW=kC-kB;return length(kV-kW*clamp(dot(kV,kW)/dot(kW,kW),0.0,1.0));}
+  float kRod(vec3 kP,vec3 kB,vec3 kC){vec3 kV=kP-kB,kW=kC-kB;return length(kV-kW*clamp(dot(kV,kW)/dot(kW,kW),0.0,1.0));}
+  vec2 kUnion(vec2 kB,vec2 kC){return kB.x<kC.x?kB:kC;}
+  // A wrapped circular coordinate. Discontinuities occur only at invisible
+  // births/deaths, or at the boundary of an exactly periodic spatial domain.
+  float kOrbit(float kA){return .5+atan(sin(kA),cos(kA))/kTau;}
+  float kFlicker(){
+    float kDip=pow(.5+.5*cos(13.0*uAngle+.8),34.0);
+    return (.94+.04*sin(7.0*uAngle)+.02*sin(19.0*uAngle+1.7))*(1.0-.20*kDip);
+  }
+  vec3 kSignSpace(vec3 kP){kP-=vec3(1.75,2.55,3.10);kP.xz=kTurn(-.30)*kP.xz;return kP;}
+  vec3 kSignVector(vec3 kP){kP.xz=kTurn(-.30)*kP.xz;return kP;}
+
+  // Three original non-alphabetic glyphs, bent from round neon tubing.
+  float kGlyph(vec2 kP){
+    vec2 kQ=kP-vec2(0,1.31);
+    float kD=abs(length(kQ)-.309);
+    if(kQ.x<-.07 && kQ.y<.10) kD=10.0;
+    kD=min(kD,kLine(kQ,vec2(-.32,.27),vec2(.26,-.27)));
+    kD=min(kD,kLine(kQ,vec2(-.32,.27),vec2(-.08,.35)));
+    kD=min(kD,length(kQ-vec2(-.32,-.20))-.015);
+    kQ=kP-vec2(0,.05);
+    kD=min(kD,kLine(kQ,vec2(-.30,.36),vec2(.27,.13)));
+    kD=min(kD,kLine(kQ,vec2(.27,.13),vec2(-.24,-.15)));
+    kD=min(kD,kLine(kQ,vec2(-.24,-.15),vec2(.26,-.37)));
+    kD=min(kD,kLine(kQ,vec2(-.30,.36),vec2(-.30,.07)));
+    kD=min(kD,kLine(kQ,vec2(.26,-.37),vec2(.31,-.08)));
+    kD=min(kD,kLine(kQ,vec2(.03,.51),vec2(.03,.33)));
+    kQ=kP-vec2(0,-1.26);
+    vec2 kR=kTurn(.785398)*kQ;
+    kD=min(kD,abs(kBox2(kR,vec2(.225),.025)));
+    kD=min(kD,kLine(kQ,vec2(-.31,-.39),vec2(.30,.39)));
+    kD=min(kD,kLine(kQ,vec2(.30,.39),vec2(.32,.12)));
+    return kD;
+  }
+  float kTubeDistance(vec3 kQ){
+    float kD=kGlyph(kQ.xy);
+    float kRim=abs(kBox2(kQ.xy,vec2(.481,2.065),.074));
+    return min(length(vec2(kD,kQ.z+.222))-.026,
+               length(vec2(kRim,kQ.z+.202))-.010);
+  }
+  vec2 kWindowCell(vec3 kP){
+    return vec2(mod(kP.y-2.3,2.8)-1.4,
+                mod(kP.z+(kP.x<0.0?1.25:3.25),4.0)-2.0);
+  }
+
+  // Architecture is kept separate so AO and soft-shadow queries need not
+  // evaluate the delicate emissive glass tubes.
+  vec2 kCity(vec3 kP){
+    vec2 kHit=vec2(kP.y,0.0);
+    vec2 kW=kWindowCell(kP);
+    float kWall=kBox(vec3(abs(kP.x)-4.2,kP.y-7.0,kP.z-15.0),vec3(.90,7.0,45.0));
+    if(kP.y>2.3){
+      float kRecess=kBox(vec3(abs(kP.x)-3.31,kW),vec3(.30,.80,.61));
+      kWall=max(kWall,-kRecess);
+    }
+    // A pair of deep, steel-framed service doorways.
+    vec3 kDoor=vec3(abs(kP.x)-3.32,kP.y-1.17,mod(kP.z+(kP.x<0.0?3.0:11.0),18.0)-9.0);
+    kWall=max(kWall,-kBox(kDoor,vec3(.25,1.17,.72)));
+    kHit=kUnion(kHit,vec2(kWall,1.0));
+    float kSill=kBox(vec3(abs(kP.x)-3.20,kW.x+.85,kW.y),vec3(.17,.055,.72));
+    if(kP.y>2.3) kHit=kUnion(kHit,vec2(kSill,4.0));
+    // Narrow raised curbs catch the grazing reflections.
+    kHit=kUnion(kHit,vec2(kBox(vec3(abs(kP.x)-3.25,kP.y-.075,kP.z),vec3(.24,.075,60.0)),3.0));
+    // Drainpipes, elbows, pipe clips.
+    vec3 kPipe=vec3(abs(kP.x)-3.13,kP.y-5.0,mod(kP.z+1.1,6.7)-3.35);
+    kHit=kUnion(kHit,vec2(max(length(kPipe.xz)-.060,abs(kPipe.y)-5.0),4.0));
+    float kCollar=max(length(kPipe.xz)-.081,abs(mod(kP.y,1.4)-.7)-.035);
+    kHit=kUnion(kHit,vec2(kCollar,4.0));
+    // AC housings on both sides, offset along the alley.
+    vec3 kAc=vec3(abs(kP.x)-3.00,kP.y-2.47,mod(kP.z+(kP.x<0.0?4.0:8.0),12.0)-6.0);
+    kHit=kUnion(kHit,vec2(kRoundBox(kAc,vec3(.31,.30,.48),.025),5.0));
+    // Fire-escape landings, handrails, and the diagonally rising stair.
+    vec3 kEscape=kP-vec3(-2.79,4.12,10.0);
+    if(kP.y>3.5 && kP.y<11.0){
+      float kDeckY=mod(kP.y-4.12+1.55,3.10)-1.55;
+      kHit=kUnion(kHit,vec2(kBox(vec3(kEscape.x,kDeckY,kEscape.z),vec3(.49,.050,1.70)),4.0));
+      kHit=kUnion(kHit,vec2(kBox(vec3(kP.x+2.28,kDeckY-.81,kEscape.z),vec3(.022,.022,1.71)),4.0));
+      kHit=kUnion(kHit,vec2(kBox(vec3(kP.x+2.28,kDeckY-.40,mod(kEscape.z+.17,.42)-.21),vec3(.018,.40,.018)),4.0));
+      vec3 kStair=kP-vec3(-2.78,5.67,10.0);
+      kStair.yz=kTurn(-1.002)*kStair.yz;
+      float kRail=max(length(vec2(abs(kStair.x)-.33,kStair.z))-.022,abs(kStair.y)-1.83);
+      kHit=kUnion(kHit,vec2(kRail,4.0));
+      float kTread=kBox(vec3(kStair.x,mod(kStair.y+.09,.28)-.14,kStair.z),vec3(.34,.022,.105));
+      kTread=max(kTread,abs(kStair.y)-1.80);
+      kHit=kUnion(kHit,vec2(kTread,4.0));
+    }
+    // Drooping cross-alley wires, each with a different catenary.
+    for(int kI=0;kI<3;kI++){
+      float kF=float(kI);
+      float kZ=.3+kF*6.7;
+      float kY=6.30+kF*.43+.075*kP.x*kP.x;
+      float kSway=.025*sin(2.0*uAngle+kP.x*.4+kF);
+      float kWire=max(length(vec2(kP.y-kY,kP.z-kZ-kSway))-.015,abs(kP.x)-3.45);
+      kHit=kUnion(kHit,vec2(kWire,4.0));
+    }
+    // A shut building at the vanishing point, with a central service portal.
+    float kEnd=kBox(kP-vec3(0,5.0,36.0),vec3(3.45,5.0,.6));
+    kEnd=max(kEnd,-kBox(kP-vec3(-.55,1.30,35.4),vec3(.75,1.3,.35)));
+    kHit=kUnion(kHit,vec2(kEnd,2.0));
+    // Continuous enamel sign, a machined metal rim, and two mounting arms.
+    vec3 kQ=kSignSpace(kP);
+    kHit=kUnion(kHit,vec2(kRoundBox(kQ,vec3(.505,2.085,.134),.055),6.0));
+    kHit=kUnion(kHit,vec2(kRoundBox(kQ-vec3(0,0,-.145),vec3(.461,2.040,.025),.025),6.0));
+    float kArm=min(kBox(kP-vec3(2.61,4.25,3.21),vec3(.67,.037,.045)),
+                   kBox(kP-vec3(2.61,.86,3.21),vec3(.67,.037,.045)));
+    kHit=kUnion(kHit,vec2(kArm,4.0));
+    // Quiet teal fixtures, kept lower in exposure than the hero sign.
+    kHit=kUnion(kHit,vec2(kRoundBox(kP-vec3(-3.09,2.87,8.0),vec3(.10,.90,.47),.035),8.0));
+    kHit=kUnion(kHit,vec2(kBox(kP-vec3(-.50,3.40,35.30),vec3(.84,.038,.035)),9.0));
+    return kHit;
+  }
+  vec2 kScene(vec3 kP){
+    vec2 kHit=kCity(kP);
+    vec3 kQ=kSignSpace(kP);
+    if(abs(kQ.x)<.65 && abs(kQ.y)<2.22 && abs(kQ.z+.21)<.7)
+      kHit=kUnion(kHit,vec2(kTubeDistance(kQ),7.0));
+    return kHit;
+  }
+  vec2 kMarch(vec3 kRo,vec3 kRd){
+    float kT=.03;vec2 kD=vec2(0.0);
+    for(int kI=0;kI<116;kI++){
+      kD=kScene(kRo+kRd*kT);
+      if(kD.x<max(.00075,kT*.00018)||kT>48.0) break;
+      kT+=kD.x*.83;
+    }
+    return vec2(kT,kD.y);
+  }
+  vec3 kNormal(vec3 kP,float kT){
+    float kE=max(.0009,kT*.00017);
+    const vec2 kV=vec2(1,-1);
+    return normalize(kV.xyy*kScene(kP+kV.xyy*kE).x+kV.yyx*kScene(kP+kV.yyx*kE).x+
+                     kV.yxy*kScene(kP+kV.yxy*kE).x+kV.xxx*kScene(kP+kV.xxx*kE).x);
+  }
+  float kOcclusion(vec3 kP,vec3 kN){
+    float kSum=0.0,kWeight=1.0;
+    for(int kI=0;kI<4;kI++){
+      float kH=.035+.105*float(kI);
+      kSum+=(kH-kCity(kP+kN*kH).x)*kWeight;kWeight*=.58;
+    }
+    return clamp(1.0-kSum*2.4,.20,1.0);
+  }
+  float kShadow(vec3 kP,vec3 kLd,float kLimit){
+    float kVis=1.0,kT=.055;
+    for(int kI=0;kI<18;kI++){
+      float kH=kCity(kP+kLd*kT).x;
+      kVis=min(kVis,9.0*kH/kT);
+      kT+=clamp(kH,.065,.65);
+      if(kT>kLimit||kVis<.035) break;
+    }
+    return clamp(kVis,.035,1.0);
+  }
+  vec3 kEnvironment(vec3 kD){
+    vec3 kCol=mix(vec3(.004,.008,.013),vec3(.011,.019,.029),smoothstep(0.0,.8,kD.y));
+    kCol+=kSteel*.060*exp(-abs(kD.y-.04)*18.0);
+    kCol+=vec3(.09,.18,.25)*pow(max(0.0,dot(kD,normalize(vec3(-.4,.9,.4)))),26.0)*.14;
+    kCol+=kTeal*.035*exp(-abs(kD.x+.65)*7.0-abs(kD.y-.15)*8.0);
+    return kCol;
+  }
+
+  // Puddle waves are radial derivatives of displaced water, not painted rings.
+  vec2 kWaterSlope(vec2 kP){
+    vec2 kGrad=vec2(0.0),kCell=floor(kP*.94);
+    for(int kJ=-1;kJ<=1;kJ++)for(int kI=-1;kI<=1;kI++){
+      vec2 kId=kCell+vec2(float(kI),float(kJ));
+      vec2 kJit=kHash2(kId);
+      vec2 kV=kP-(kId+.15+.7*kJit)/.94;
+      float kR=length(kV)+.0001;
+      float kLife=kOrbit(7.0*uAngle+kTau*kHash(kId+19.3));
+      float kDelta=kR-kLife*.90;
+      float kEnv=exp(-kDelta*kDelta*420.0)*sin(kPi*kLife)*exp(-2.0*kLife);
+      float kDeriv=(65.0*cos(65.0*kDelta)-840.0*kDelta*sin(65.0*kDelta))*kEnv;
+      kGrad+=(kV/kR)*kDeriv*.00105;
+    }
+    kGrad+=vec2(cos(kP.x*51.0+3.0*sin(3.0*uAngle))*sin(kP.y*39.0+3.0*cos(3.0*uAngle)),
+                sin(kP.x*51.0+3.0*sin(3.0*uAngle))*cos(kP.y*39.0+3.0*cos(3.0*uAngle)))*.009;
+    kGrad+=vec2(cos(kP.x*2.7+kP.y*1.3+sin(uAngle)),cos(kP.y*3.2-kP.x*.7+cos(uAngle)))*.009;
+    return kGrad;
+  }
+  vec3 kMirrorCity(vec3 kP,vec3 kD,float kRough){
+    vec3 kCol=kEnvironment(kD);
+    vec3 kO=kSignSpace(kP),kV=kSignVector(kD);
+    if(kV.z>.0001){
+      float kT=(-.226-kO.z)/kV.z;
+      if(kT>0.0){
+        vec3 kQ=kO+kV*kT;
+        float kBoard=kBox2(kQ.xy,vec2(.55,2.14),.07);
+        float kSoft=.004+kT*.0012+kRough*.018;
+        float kDg=kGlyph(kQ.xy);
+        float kEdge=abs(kBox2(kQ.xy,vec2(.481,2.065),.074));
+        float kCore=1.0-smoothstep(.020-kSoft,.030+kSoft,kDg);
+        float kRim=1.0-smoothstep(.006,.014+kSoft,kEdge);
+        float kHalo=exp(-kDg*14.0)*.42+exp(-kEdge*35.0)*.11;
+        if(kBoard<.15){
+          kCol=mix(kCol,vec3(.003,.006,.009),1.0-smoothstep(-.02,.04,kBoard));
+          kCol+=kPink*(kCore*15.0+kRim*4.7+kHalo)*kFlicker();
+        }
+        kCol+=kPink*.16*exp(-length(kQ.xy*vec2(1.7,.36))*2.3)*kFlicker();
+      }
+    }
+    // Opposite-wall neon and window slots reflected from their real planes.
+    if(kD.x<-.001){
+      float kT=(-2.97-kP.x)/kD.x;
+      vec3 kQ=kP+kD*kT;
+      float kPane=kBox2(vec2(kQ.z-8.0,kQ.y-2.87),vec2(.43,.84),.05);
+      float kRim=abs(kPane);
+      kCol+=kTeal*exp(-kRim*80.0)*1.9;
+      kCol+=kTeal*.5*exp(-abs(kQ.y-2.87)*11.0)*exp(-abs(kQ.z-8.0)*2.0);
+    }
+    return kCol;
+  }
+  vec3 kBrdf(vec3 kN,vec3 kV,vec3 kL,vec3 kAlbedo,float kRough,float kMetal){
+    vec3 kH=normalize(kV+kL);
+    float kNl=max(dot(kN,kL),0.0),kNv=max(dot(kN,kV),.001);
+    float kNh=max(dot(kN,kH),0.0),kVh=max(dot(kV,kH),0.0);
+    float kA=max(.025,kRough*kRough),kA2=kA*kA;
+    float kDen=kNh*kNh*(kA2-1.0)+1.0;
+    float kDist=kA2/(kPi*kDen*kDen+.0001);
+    float kK=(kRough+1.0)*(kRough+1.0)*.125;
+    float kGeo=kNv/(kNv*(1.0-kK)+kK)*kNl/(kNl*(1.0-kK)+kK);
+    vec3 kF=mix(vec3(.035),kAlbedo,kMetal);
+    kF+=(1.0-kF)*pow(1.0-kVh,5.0);
+    return ((1.0-kF)*kAlbedo*(1.0-kMetal)/kPi+kDist*kGeo*kF/(4.0*kNl*kNv+.001))*kNl;
+  }
+  vec3 kShade(vec3 kP,vec3 kRd,float kMat,float kT){
+    bool kFloor=kMat<.5;
+    vec3 kN=kFloor?vec3(0,1,0):kNormal(kP,kT);
+    vec3 kAlbedo=vec3(.040,.049,.058);
+    float kRough=.68,kMetal=.05;vec3 kEmission=vec3(0);
+    float kGrain=kValue(kP.xz*84.0+kP.y*19.0);
+    float kPuddle=1.0;
+    if(kFloor){
+      kPuddle=smoothstep(.27,.62,kField(kP.xz*.87));
+      kAlbedo=vec3(.016,.021,.027)*(.5+.65*kGrain);
+      kN=normalize(vec3(kWaterSlope(kP.xz)*mix(.40,1.0,kPuddle),1.0).xzy);
+      kRough=mix(.58,.065,kPuddle);
+      // Drain covers, tar repairs and aggregate at three scales.
+      vec2 kG=vec2(kP.x+2.58,mod(kP.z+1.5,7.5)-3.75);
+      float kGrate=1.0-smoothstep(-.02,.015,kBox2(kG,vec2(.25,.49),.025));
+      float kSlots=smoothstep(.018,.026,abs(mod(kG.y,.11)-.055));
+      kAlbedo*=mix(1.0,mix(.12,.65,kSlots),kGrate);
+      kMetal=mix(.0,.65,kGrate);kRough=mix(kRough,.24,kGrate);
+    }else if(kMat<1.5){
+      vec2 kW=kWindowCell(kP);
+      vec2 kBrickUv=vec2(kP.z*2.25+floor(kP.y*4.8)*.5,kP.y*4.8);
+      vec2 kBrick=abs(fract(kBrickUv)-.5);
+      float kMortar=smoothstep(.457,.495,max(kBrick.x,kBrick.y));
+      kAlbedo=vec3(.052,.061,.066)*mix(.74,1.17,kHash(floor(kBrickUv)));
+      kAlbedo*=1.0-.53*kMortar;
+      kN=normalize(kN+vec3(0,.042*cos(kP.y*73.0)*sin(kP.z*57.0),.042*sin(kP.y*73.0)*cos(kP.z*57.0)));
+      float kLeak=.60+.4*kField(vec2(kP.z*2.1,kP.y*.16));kAlbedo*=kLeak;
+      if(abs(kP.x)>3.45 && abs(kW.x)<.78 && abs(kW.y)<.59 && kP.y>2.3){
+        float kMullion=max(1.0-smoothstep(.018,.035,abs(kW.y)),1.0-smoothstep(.018,.032,abs(kW.x+.1)));
+        kAlbedo=vec3(.025,.047,.052);kRough=.11;kMetal=.5;
+        vec2 kRoom=floor(vec2((kP.z+(kP.x<0.0?1.25:3.25))/4.0,(kP.y-2.3)/2.8));
+        float kLit=step(.56,kHash(kRoom+vec2(kP.x<0.0?7.0:23.0,1.0)));
+        float kBlind=.48+.52*smoothstep(.02,.045,abs(mod(kW.x,.14)-.07));
+        kEmission=vec3(.08,.18,.21)*kLit*(1.0-kMullion)*kBlind;
+        kAlbedo*=1.0-.8*kMullion;
+      }
+    }else if(kMat<2.5){
+      kAlbedo=vec3(.035,.047,.052);
+      kAlbedo*=.48+.52*smoothstep(.01,.045,abs(mod(kP.y,.18)-.09));
+    }else if(kMat<3.5){
+      kAlbedo=vec3(.047,.057,.061);kRough=.35;
+    }else if(kMat<4.5){
+      kAlbedo=vec3(.064,.081,.085);kRough=.30;kMetal=.82;
+    }else if(kMat<5.5){
+      kAlbedo=vec3(.10,.12,.12);kRough=.36;kMetal=.62;
+      vec3 kQ=vec3(abs(kP.x)-3.0,kP.y-2.47,mod(kP.z+(kP.x<0.0?4.0:8.0),12.0)-6.0);
+      if(abs(kN.x)>.7){
+        float kVent=smoothstep(.012,.022,abs(mod(kQ.y,.075)-.0375));
+        float kFan=1.0-smoothstep(.22,.25,length(kQ.yz));
+        kAlbedo*=mix(.10,.80,kVent)*(.6+.4*(1.0-kFan));
+      }
+    }else if(kMat<6.5){
+      vec3 kQ=kSignSpace(kP);
+      kAlbedo=vec3(.014,.019,.025);kRough=.21;kMetal=.64;
+      float kEdge=abs(kBox2(kQ.xy,vec2(.49,2.07),.07));
+      kAlbedo+=vec3(.08)*exp(-kEdge*140.0);
+      // Tiny porcelain tube clips and machined corner screws.
+      vec2 kBolt=abs(kQ.xy)-vec2(.435,1.98);
+      float kScrew=1.0-smoothstep(.016,.027,length(kBolt));
+      kAlbedo=mix(kAlbedo,vec3(.3),kScrew);
+      kEmission=kPink*(.11*exp(-kGlyph(kQ.xy)*12.0)+.025*exp(-kEdge*35.0))*kFlicker();
+    }else if(kMat<7.5){
+      vec3 kQ=kSignSpace(kP);
+      float kRim=abs(kBox2(kQ.xy,vec2(.481,2.065),.074));
+      float kPower=kRim<.018?5.5:18.0;
+      kEmission=kPink*kPower*kFlicker();
+      kAlbedo=vec3(.22,.04,.09);kRough=.16;
+    }else if(kMat<8.5){
+      vec2 kQ=vec2(kP.z-8.0,kP.y-2.87);
+      float kEdge=abs(kBox2(kQ,vec2(.42,.83),.055));
+      float kRune=min(abs(length(kQ*vec2(1.7,1.0))-.40),kLine(kQ,vec2(-.20,.50),vec2(.20,-.50)));
+      kEmission=kTeal*(3.0*exp(-kEdge*130.0)+4.0*exp(-kRune*110.0));
+      kAlbedo=vec3(.016,.035,.040);kRough=.23;kMetal=.65;
+    }else{
+      kEmission=kTeal*4.0;kRough=.25;
+    }
+    float kAo=kFloor?1.0:kOcclusion(kP,kN);
+    vec3 kV=-kRd;
+    vec3 kLit=kAlbedo*vec3(.11,.17,.23)*kAo*(.35+.65*max(kN.y,0.0));
+    vec3 kPinkPos=vec3(1.72,clamp(kP.y,.72,4.36),2.76);
+    vec3 kDelta=kPinkPos-kP;float kDist=length(kDelta);vec3 kLd=kDelta/max(kDist,.001);
+    float kVis=kDist<16.0?kShadow(kP+kN*.014,kLd,kDist-.10):1.0;
+    vec3 kRad=kPink*24.0*kFlicker()/(1.0+kDist*kDist*.62);
+    kLit+=kBrdf(kN,kV,kLd,kAlbedo,max(kRough,.23),kMetal)*kRad*kVis;
+    kDelta=vec3(-2.91,3.13,8.0)-kP;kDist=length(kDelta);kLd=kDelta/max(kDist,.001);
+    kLit+=kBrdf(kN,kV,kLd,kAlbedo,max(.25,kRough),kMetal)*kTeal*8.0/(1.0+kDist*kDist*.5);
+    vec3 kOver=normalize(vec3(-.25,1.0,.28));
+    kLit+=kBrdf(kN,kV,kOver,kAlbedo,.65,kMetal)*kSteel*.30*kAo;
+    if(kFloor){
+      float kFresnel=.035+.965*pow(1.0-max(dot(kN,kV),0.0),5.0);
+      vec3 kRefl=kMirrorCity(kP+vec3(0,.012,0),reflect(kRd,kN),kRough);
+      float kBreak=.75+.25*kValue(vec2(kP.x*110.0,kP.z*26.0));
+      kLit+=kRefl*kFresnel*mix(.22,1.0,kPuddle)*kBreak;
+      // Tiny wet aggregate picks up the same area light as the puddles.
+      kLit+=kRad*.0009*pow(kGrain,12.0)*kVis;
+    }else{
+      vec3 kRf=reflect(kRd,kN);
+      float kFr=.04+.96*pow(1.0-max(dot(kN,kV),0.0),5.0);
+      kLit+=kEnvironment(kRf)*mix(kFr,.65,kMetal)*(1.0-kRough*.6)*kAo;
+    }
+    return kLit+kEmission;
+  }
+
+  vec3 kFog(vec3 kRo,vec3 kRd,float kLimit,vec3 kBehind){
+    float kTrans=1.0;vec3 kSum=vec3(0);
+    const int kSteps=18;
+    float kStep=min(kLimit,42.0)/float(kSteps);
+    vec2 kDrift=vec2(cos(uAngle),sin(uAngle));
+    for(int kI=0;kI<kSteps;kI++){
+      float kT=(float(kI)+.5)*kStep;vec3 kQ=kRo+kRd*kT;
+      float kCloud=kValue(kQ.xz*.27+kDrift*.7+.2*sin(kQ.y*.8));
+      float kRoll=kValue(vec2(kQ.z*.18,kQ.y*.6)+vec2(cos(2.0*uAngle),sin(2.0*uAngle))*.45);
+      float kDensity=(.018+.030*kCloud*kRoll)*exp(-max(kQ.y,0.0)*.12);
+      kDensity+=.025*exp(-max(kQ.y,0.0)*2.7)*kCloud;
+      vec3 kDelta=vec3(1.72,clamp(kQ.y,.77,4.37),2.9)-kQ;
+      float kD2=dot(kDelta,kDelta);
+      float kPhase=.38+.62*pow(max(dot(-kRd,normalize(kDelta)),0.0),5.0);
+      vec3 kScat=vec3(.038,.068,.105);
+      kScat+=kPink*3.5*kFlicker()*kPhase/(1.0+kD2*.75);
+      kDelta=vec3(-2.9,2.9,8.0)-kQ;
+      kScat+=kTeal*.67/(1.0+dot(kDelta,kDelta)*.25);
+      // A soft roof opening pulls a steel-blue shaft into the rear haze.
+      float kShaft=exp(-pow((kQ.x+.55+(kQ.y-5.0)*.24)*.85,2.0));
+      kScat+=kSteel*.20*kShaft*smoothstep(8.0,28.0,kQ.z);
+      float kAtt=exp(-kDensity*kStep);
+      kSum+=kTrans*(1.0-kAtt)*kScat;kTrans*=kAtt;
+    }
+    return kBehind*kTrans+kSum;
+  }
+  vec3 kRain(vec2 kUv,vec3 kCamera){
+    vec3 kCol=vec3(0);
+    for(int kI=0;kI<2;kI++){
+      float kF=float(kI);
+      vec2 kGridScale=mix(vec2(90,28),vec2(43,13),kF);
+      vec2 kG=kUv*kGridScale;
+      kG.x+=(kCamera.x+.45)*(1.5+kF*4.0)+.40*sin(uAngle);
+      kG.x+=kG.y*.065;
+      kG.y+=kOrbit((9.0+2.0*kF)*uAngle)*kGridScale.y;
+      vec2 kCell=floor(kG);kCell.y=mod(kCell.y,kGridScale.y);
+      vec2 kJit=kHash2(kCell+vec2(kF*71.0,3.0));
+      vec2 kQ=fract(kG)-vec2(.15+.70*kJit.x,.5);
+      float kLen=.14+.24*kJit.y+kF*.12;
+      float kWidth=mix(.018,.027,kF);
+      float kD=length(vec2(kQ.x,max(abs(kQ.y)-kLen,0.0)));
+      float kAa=kGridScale.x/uResolution.y*.55;
+      float kStreak=1.0-smoothstep(kWidth,kWidth+kAa,kD);
+      kStreak*=smoothstep(.80,.98,kHash(kCell+vec2(19.2,kF*57.0)));
+      float kPinkAura=exp(-dot((kUv-vec2(.43,.30))*vec2(1.7,1.0),(kUv-vec2(.43,.30))*vec2(1.7,1.0))*2.8);
+      vec3 kTint=mix(vec3(.12,.22,.30),kPink*.75,kPinkAura*.7);
+      kCol+=kTint*kStreak*(.105+.105*kF);
+    }
+    return kCol;
+  }
+  vec3 kImage(vec2 kPixel){
+    vec2 kUv=(2.0*kPixel-uResolution)/uResolution.y;
+    float kAspect=uResolution.x/uResolution.y;
+    float kLens=2.10*min(1.0,kAspect/.76);
+    vec3 kCamera=vec3(-.45+.15*cos(uAngle),1.27+.025*sin(2.0*uAngle),-4.65+.48*sin(uAngle));
+    vec3 kTarget=vec3(.15,2.25,9.5);
+    vec3 kForward=normalize(kTarget-kCamera);
+    vec3 kRight=normalize(cross(kForward,vec3(0,1,0)));
+    // In this +Z-facing world, screen right is +X.
+    kRight=-kRight;
+    vec3 kUp=normalize(cross(kForward,kRight));
+    vec3 kRd=normalize(kRight*kUv.x+kUp*kUv.y+kForward*kLens);
+    vec2 kHit=kMarch(kCamera,kRd);
+    vec3 kCol;
+    if(kHit.x<48.0){vec3 kP=kCamera+kRd*kHit.x;kCol=kShade(kP,kRd,kHit.y,kHit.x);}
+    else{kCol=kEnvironment(kRd)*.8;}
+    kCol=kFog(kCamera,kRd,min(kHit.x,48.0),kCol);
+    kCol+=kRain(kUv,kCamera);
+    return max(kCol,vec3(0));
+  }
+  void main(){
+    vec3 kCol=vec3(0);
+    for(int kY=0;kY<2;kY++)for(int kX=0;kX<2;kX++){
+      vec2 kOffset=(vec2(float(kX),float(kY))+.5)*.5-.5;
+      kCol+=kImage(gl_FragCoord.xy+kOffset);
+    }
+    kCol*=.25;
+    // Reversible HDR encoding also works without floating-point framebuffer extensions.
+    fragColor=vec4(kCol/(1.0+kCol),1);
+  }`;
+
+  const bloomSource = `#version 300 es
+  precision highp float;
+  uniform sampler2D uScene;
+  uniform sampler2D uGlow;
+  uniform vec2 uTexel;
+  uniform vec2 uAxis;
+  uniform int uExtract;
+  in vec2 vUv;
+  out vec4 fragColor;
+  vec3 kDecode(vec3 kC){return kC/max(vec3(.003),1.0-kC);}
+  vec3 kRead(vec2 kUv){
+    vec3 kC=uExtract==1?kDecode(texture(uScene,kUv).rgb):kDecode(texture(uGlow,kUv).rgb);
+    if(uExtract==1){float kM=max(kC.r,max(kC.g,kC.b));kC*=max(kM-.52,0.0)/max(kM,.001);}
+    return kC;
+  }
+  void main(){
+    vec3 kC=kRead(vUv)*.19648255;
+    kC+=(kRead(vUv+uAxis*uTexel*1.4117647)+kRead(vUv-uAxis*uTexel*1.4117647))*.29690696;
+    kC+=(kRead(vUv+uAxis*uTexel*3.2941176)+kRead(vUv-uAxis*uTexel*3.2941176))*.09447040;
+    kC+=(kRead(vUv+uAxis*uTexel*5.1764706)+kRead(vUv-uAxis*uTexel*5.1764706))*.01038136;
+    fragColor=vec4(kC/(1.0+kC),1);
+  }`;
+
+  const finishSource = `#version 300 es
+  precision highp float;
+  uniform sampler2D uScene;
+  uniform sampler2D uGlow;
+  uniform vec2 uResolution;
+  uniform float uAngle;
+  in vec2 vUv;
+  out vec4 fragColor;
+  vec3 kDecode(vec3 kC){return kC/max(vec3(.003),1.0-kC);}
+  float kHash(vec2 kQ){return fract(sin(dot(kQ,vec2(12.9898,78.233)))*43758.5453);}
+  float kGrain(vec2 kQ){
+    vec2 kI=floor(kQ),kF=fract(kQ);kF=kF*kF*(3.0-2.0*kF);
+    return mix(mix(kHash(kI),kHash(kI+vec2(1,0)),kF.x),mix(kHash(kI+vec2(0,1)),kHash(kI+1.0),kF.x),kF.y);
+  }
+  vec3 kAces(vec3 kC){return clamp((kC*(2.51*kC+.03))/(kC*(2.43*kC+.59)+.14),0.0,1.0);}
+  void main(){
+    vec2 kRad=vUv-.5;
+    vec2 kFringe=kRad*dot(kRad,kRad)*.0015;
+    vec3 kC=kDecode(texture(uScene,vUv).rgb);
+    kC.r=kDecode(texture(uScene,vUv+kFringe).rgb).r;
+    kC.b=kDecode(texture(uScene,vUv-kFringe).rgb).b;
+    vec3 kBloom=kDecode(texture(uGlow,vUv).rgb);
+    vec3 kWide=vec3(0);
+    for(int kI=0;kI<8;kI++){
+      float kA=float(kI)*.7853981634;
+      vec2 kV=vec2(cos(kA),sin(kA))*vec2(uResolution.y/uResolution.x,1.0)*.016;
+      kWide+=kDecode(texture(uGlow,vUv+kV).rgb);
+    }
+    kWide*=.125;
+    kC+=kBloom*.30+kWide*.20;
+    // Restrained rose halation lives outside the tube's hotter inner core.
+    kC+=vec3(1.0,.018,.085)*kWide.r*.040;
+    float kVignette=1.0-.27*smoothstep(.17,.72,length(kRad*vec2(.88,1.0)));
+    kC=kAces(kC*1.16*kVignette);
+    kC=pow(kC,vec3(1.0/2.2));
+    float kDust=kGrain(gl_FragCoord.xy+vec2(cos(17.0*uAngle),sin(17.0*uAngle))*29.0)-.5;
+    kC+=kDust*.011*(.45+.55*sqrt(max(kC.r,max(kC.g,kC.b))));
+    fragColor=vec4(clamp(kC,0.0,1.0),1);
+  }`;
+
+  function compile(kind,source,label){
+    const shader=gl.createShader(kind);
+    gl.shaderSource(shader,source);gl.compileShader(shader);
+    const log=gl.getShaderInfoLog(shader);
+    if(log) console[gl.getShaderParameter(shader,gl.COMPILE_STATUS)?'warn':'error'](label+' shader: '+log);
+    if(!gl.getShaderParameter(shader,gl.COMPILE_STATUS)){
+      gl.deleteShader(shader);throw new Error(label+' shader did not compile.');
+    }
+    return shader;
+  }
+  function program(source,label){
+    const p=gl.createProgram();
+    const v=compile(gl.VERTEX_SHADER,vertexSource,label+' vertex');
+    const f=compile(gl.FRAGMENT_SHADER,source,label+' fragment');
+    gl.attachShader(p,v);gl.attachShader(p,f);gl.linkProgram(p);
+    const log=gl.getProgramInfoLog(p);
+    if(log) console[gl.getProgramParameter(p,gl.LINK_STATUS)?'warn':'error'](label+' link: '+log);
+    gl.deleteShader(v);gl.deleteShader(f);
+    if(!gl.getProgramParameter(p,gl.LINK_STATUS)) throw new Error(label+' program did not link.');
+    return {id:p,loc:Object.create(null)};
+  }
+  let scene,bloom,finish;
+  try{
+    scene=program(sceneSource,'Alley');
+    bloom=program(bloomSource,'Bloom');
+    finish=program(finishSource,'Filmic resolve');
+  }catch(error){console.error(error);return;}
+  gl.bindVertexArray(gl.createVertexArray());
+  gl.disable(gl.DEPTH_TEST);gl.disable(gl.BLEND);
+  function uniform(p,name){return p.loc[name]??(p.loc[name]=gl.getUniformLocation(p.id,name));}
+  function mulberry32(seed){return function(){let n=seed+=0x6D2B79F5;n=Math.imul(n^n>>>15,n|1);n^=n+Math.imul(n^n>>>7,n|61);return((n^n>>>14)>>>0)/4294967296;};}
+  const seeded=mulberry32(0x2A4E0F17);
+  const noiseSeed=seeded()*7.0;
+  const rawFreeze=new URLSearchParams(location.search).get('t');
+  const freeze=rawFreeze!==null&&rawFreeze.trim()!==''&&Number.isFinite(Number(rawFreeze))
+    ? ((Number(rawFreeze)%1)+1)%1 : null;
+  const targets=[];
+  let width=0,height=0,glowWidth=0,glowHeight=0,raf=0;
+  function target(w,h){
+    const tex=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,tex);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,w,h,0,gl.RGBA,gl.HALF_FLOAT,null);
+    const fb=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+    if(!floatTargets || gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE){
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+      if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE) throw new Error('Framebuffer allocation failed.');
+    }
+    return {tex,fb};
+  }
+  const floatTargets=!!gl.getExtension('EXT_color_buffer_float');
+  function resize(){
+    const dpr=Math.max(1,window.devicePixelRatio||1);
+    // Four rays per pixel: a bounded interactive buffer keeps the loop useful
+    // on high-DPI mobile devices while retaining true shader supersampling.
+    // Frozen stills retain the complete native pixel grid, including 4K.
+    const scale=freeze!==null?dpr:Math.min(dpr,Math.sqrt(2200000/(innerWidth*innerHeight)));
+    const w=Math.max(2,Math.round(innerWidth*scale)),h=Math.max(2,Math.round(innerHeight*scale));
+    if(w===width&&h===height) return;
+    width=canvas.width=w;height=canvas.height=h;
+    glowWidth=Math.max(2,Math.ceil(w/4));glowHeight=Math.max(2,Math.ceil(h/4));
+    for(const t of targets){gl.deleteTexture(t.tex);gl.deleteFramebuffer(t.fb);}targets.length=0;
+    targets.push(target(w,h),target(glowWidth,glowHeight),target(glowWidth,glowHeight));
+  }
+  function bindTex(p,name,tex,unit){
+    gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(gl.TEXTURE_2D,tex);gl.uniform1i(uniform(p,name),unit);
+  }
+  function pass(p,fb,w,h){gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.viewport(0,0,w,h);gl.useProgram(p.id);}
+  function draw(timestamp){
+    raf=0;
+    if(gl.isContextLost()) return;
+    resize();
+    const phase=freeze===null?((timestamp/1000)%10)/10:freeze;
+    const angle=phase*Math.PI*2;
+    pass(scene,targets[0].fb,width,height);
+    gl.uniform2f(uniform(scene,'uResolution'),width,height);
+    gl.uniform1f(uniform(scene,'uAngle'),angle);gl.uniform1f(uniform(scene,'uSeed'),noiseSeed);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+    pass(bloom,targets[1].fb,glowWidth,glowHeight);
+    bindTex(bloom,'uScene',targets[0].tex,0);bindTex(bloom,'uGlow',targets[2].tex,1);
+    gl.uniform2f(uniform(bloom,'uTexel'),1/width,1/height);
+    gl.uniform2f(uniform(bloom,'uAxis'),4,0);gl.uniform1i(uniform(bloom,'uExtract'),1);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+    pass(bloom,targets[2].fb,glowWidth,glowHeight);
+    bindTex(bloom,'uGlow',targets[1].tex,1);
+    gl.uniform2f(uniform(bloom,'uTexel'),1/glowWidth,1/glowHeight);
+    gl.uniform2f(uniform(bloom,'uAxis'),0,1);gl.uniform1i(uniform(bloom,'uExtract'),0);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+    pass(finish,null,width,height);
+    bindTex(finish,'uScene',targets[0].tex,0);bindTex(finish,'uGlow',targets[2].tex,1);
+    gl.uniform2f(uniform(finish,'uResolution'),width,height);gl.uniform1f(uniform(finish,'uAngle'),angle);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+    canvas.dataset.ready='true';
+    if(freeze===null&&!document.hidden) raf=requestAnimationFrame(draw);
+  }
+  addEventListener('resize',()=>{if(!raf) raf=requestAnimationFrame(draw);},{passive:true});
+  document.addEventListener('visibilitychange',()=>{
+    if(document.hidden){cancelAnimationFrame(raf);raf=0;}
+    else if(!raf) raf=requestAnimationFrame(draw);
+  });
+  canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();cancelAnimationFrame(raf);raf=0;});
+  canvas.addEventListener('webglcontextrestored',()=>location.reload());
+  raf=requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>
